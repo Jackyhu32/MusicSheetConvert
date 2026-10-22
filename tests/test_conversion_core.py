@@ -12,6 +12,7 @@ from src.music_convert import core
 ROOT = Path(__file__).resolve().parent.parent
 G_MAJOR = ROOT / "tests" / "fixtures" / "g-major-two-bars.musicxml"
 SATBB = ROOT / "tests" / "fixtures" / "satbb-two-measures.musicxml"
+MODE_CHANGE = ROOT / "tests" / "fixtures" / "c-major-to-a-minor.musicxml"
 
 SIGNATURE_CHANGE_XML = """<?xml version="1.0"?>
 <score-partwise version="4.0">
@@ -21,7 +22,7 @@ SIGNATURE_CHANGE_XML = """<?xml version="1.0"?>
       <key><fifths>0</fifths><mode>major</mode></key><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
       <note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration></note>
     </measure>
-    <measure number="2"><attributes><key><fifths>1</fifths><mode>major</mode></key></attributes>
+    <measure number="2"><attributes><key><fifths>1</fifths></key></attributes>
       <note><pitch><step>G</step><octave>4</octave></pitch><duration>4</duration></note>
     </measure>
   </part>
@@ -72,6 +73,29 @@ NO_KEY_XML = """<?xml version="1.0"?>
   <part id="P"><measure number="1">
     <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
     <note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration></note>
+  </measure></part>
+</score-partwise>
+"""
+
+NO_EXPLICIT_MODE_XML = """<?xml version="1.0"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P"><part-name>Voice</part-name></score-part></part-list>
+  <part id="P"><measure number="1">
+    <attributes><divisions>1</divisions><key><fifths>0</fifths></key>
+      <time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+    <note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration></note>
+  </measure></part>
+</score-partwise>
+"""
+
+GRACE_XML = """<?xml version="1.0"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P"><part-name>Voice</part-name></score-part></part-list>
+  <part id="P"><measure number="1">
+    <attributes><divisions>1</divisions><key><fifths>0</fifths><mode>major</mode></key>
+      <time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+    <note><grace/><pitch><step>D</step><octave>4</octave></pitch><voice>1</voice></note>
+    <note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice></note>
   </measure></part>
 </score-partwise>
 """
@@ -135,6 +159,16 @@ class ConversionCoreTests(unittest.TestCase):
                       if row["type"] == "event"]
         self.assertEqual(["1", "5"], [row["pitches"] for row in events])
 
+    def test_explicit_mode_change_uses_each_measures_active_mode(self):
+        events = [
+            row for row in rows(core.musicxml_to_jianpu_text(MODE_CHANGE))
+            if row["type"] == "event"
+        ]
+        self.assertEqual(
+            [("1", "1"), ("2", "3")],
+            [(row["measure"], row["pitches"]) for row in events],
+        )
+
     def test_fixed_mode_maps_c4_to_one_and_d4_to_two_without_a_key_signature(self):
         fixed_xml = NO_KEY_XML.replace(
             '<note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration></note>',
@@ -146,6 +180,25 @@ class ConversionCoreTests(unittest.TestCase):
             events = [row for row in rows(core.musicxml_to_jianpu_text(path, mode="fixed"))
                       if row["type"] == "event"]
         self.assertEqual(["1", "2"], [row["pitches"] for row in events])
+
+    def test_fixed_tenor_uses_sounding_pitch_but_records_written_pitch(self):
+        events = [
+            row for row in rows(core.musicxml_to_jianpu_text(SATBB, mode="fixed"))
+            if row["type"] == "event" and row["part"] == "P-T"
+        ]
+        tenor_c4 = next(row for row in events if row["measure"] == "1")
+        self.assertEqual("1v1", tenor_c4["pitches"])
+        self.assertEqual(["C4"], tenor_c4["written_pitches"])
+
+    def test_grace_event_duration_is_the_models_fraction_text(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_xml(directory, "grace.musicxml", GRACE_XML)
+            events = [
+                row for row in rows(core.musicxml_to_jianpu_text(path))
+                if row["type"] == "event"
+            ]
+        grace = next(row for row in events if row["grace"])
+        self.assertEqual("0", grace["duration"])
 
     def test_event_jsonl_preserves_parts_chords_ties_rests_and_escaped_lyrics(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -186,6 +239,21 @@ class ConversionCoreTests(unittest.TestCase):
                 core.musicxml_to_jianpu_text(path, mode="movable")
             fixed = core.musicxml_to_jianpu_text(path, mode="fixed")
         self.assertTrue(any(row["type"] == "event" for row in rows(fixed)))
+
+    def test_movable_without_explicit_mode_fails_closed_even_with_fifths(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_xml(directory, "no-mode.musicxml", NO_EXPLICIT_MODE_XML)
+            with self.assertRaisesRegex(ValueError, "missing_key_mode"):
+                core.musicxml_to_jianpu_text(path, mode="movable")
+
+    def test_explicit_tonic_overrides_missing_mode(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_xml(directory, "no-mode.musicxml", NO_EXPLICIT_MODE_XML)
+            events = [
+                row for row in rows(core.musicxml_to_jianpu_text(path, tonic="C"))
+                if row["type"] == "event"
+            ]
+        self.assertEqual("1", events[0]["pitches"])
 
     def test_invalid_timeline_is_rejected_before_midi_output_is_created(self):
         with tempfile.TemporaryDirectory() as directory:

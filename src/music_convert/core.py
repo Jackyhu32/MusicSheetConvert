@@ -2,12 +2,12 @@
 
 Jianpu output is JSON Lines: each part starts with a ``type=part`` header and
 one ``type=event`` row represents each source event. Event rows include part,
-measure number, staff, voice, measure-local Fraction onset, positive duration,
-kind, Jianpu pitch token(s), per-pitch tie states, lossless JSON lyrics, and a
-grace flag. A chord remains one row with parallel pitch/tie arrays; rests use
-pitch token ``0``. Grace events use duration ``1`` as a display sentinel and
-``grace=true`` means they occupy no musical time. Fractions are rendered as
-integers or ``numerator/denominator`` strings.
+measure number, staff, voice, measure-local Fraction onset and duration, kind,
+Jianpu pitch token(s), written pitches for auditing, per-pitch tie states,
+lossless JSON lyrics, and a grace flag. A chord remains one row with parallel
+pitch/tie arrays; rests use pitch token ``0``. ``grace=true`` means the event
+occupies no musical time. Fractions are rendered as integers or
+``numerator/denominator`` strings.
 
 MusicXML is parsed to a ScoreModel once for conversion. Semantic validation is
 blocking for both text and MIDI output.
@@ -16,10 +16,13 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from fractions import Fraction
+from io import BytesIO
 import json
 from math import lcm
 from pathlib import Path
 from typing import Optional
+import xml.etree.ElementTree as ET
+import zipfile
 
 import music21
 import pretty_midi
@@ -164,35 +167,143 @@ _MINOR_TONICS = {
 }
 
 
-def _notation_key(model, tonic: str | None) -> tuple[str, str]:
-    first_key = next(
-        (
-            measure
-            for measure in sorted(model.measures, key=lambda item: item.index)
-            if measure.fifths is not None and measure.mode in ("major", "minor")
-        ),
-        None,
+def _xml_local_name(element: ET.Element) -> str:
+    return element.tag.rsplit("}", 1)[-1]
+
+
+def _source_xml_root(source: bytes | None) -> ET.Element | None:
+    if source is None:
+        return None
+    try:
+        if not zipfile.is_zipfile(BytesIO(source)):
+            return ET.fromstring(source)
+        with zipfile.ZipFile(BytesIO(source)) as archive:
+            names = archive.namelist()
+            root_path = None
+            if "META-INF/container.xml" in names:
+                container = ET.fromstring(archive.read("META-INF/container.xml"))
+                rootfile = next(
+                    (item for item in container.iter()
+                     if _xml_local_name(item) == "rootfile"),
+                    None,
+                )
+                root_path = rootfile.get("full-path") if rootfile is not None else None
+            if root_path not in names:
+                root_path = next(
+                    (name for name in names
+                     if name.lower().endswith((".musicxml", ".xml"))
+                     and not name.lower().startswith("meta-inf/")),
+                    None,
+                )
+            return ET.fromstring(archive.read(root_path)) if root_path else None
+    except (ET.ParseError, OSError, zipfile.BadZipFile, KeyError):
+        return None
+
+
+def _explicit_modes_by_measure(model) -> dict[int, str | None]:
+    """Read explicit MusicXML mode changes without inferring from fifths."""
+    root = _source_xml_root(model.source_musicxml)
+    parts = (
+        [item for item in root if _xml_local_name(item) == "part"]
+        if root is not None else []
     )
-    if first_key is None:
-        code = "missing_tonic" if tonic is None else "missing_key_mode"
-        raise ValueError(f"{code}: movable notation requires a clear key context")
-    key_mode = first_key.mode
-    if tonic is not None:
-        return tonic, key_mode
-    table = _MAJOR_TONICS if key_mode == "major" else _MINOR_TONICS
-    resolved_tonic = table.get(first_key.fifths)
-    if resolved_tonic is None:
-        raise ValueError("missing_tonic: unsupported key signature")
-    return resolved_tonic, key_mode
+    active_mode: str | None = None
+    result: dict[int, str | None] = {}
+    for index in range(len(model.measures)):
+        updates = []
+        for part in parts:
+            measures = [item for item in part if _xml_local_name(item) == "measure"]
+            if index >= len(measures):
+                continue
+            for attributes in measures[index]:
+                if _xml_local_name(attributes) != "attributes":
+                    continue
+                for key_element in attributes:
+                    if _xml_local_name(key_element) != "key":
+                        continue
+                    for child in key_element:
+                        if _xml_local_name(child) == "mode" and child.text:
+                            updates.append(child.text.strip().lower())
+        distinct_updates = set(updates)
+        if len(distinct_updates) > 1:
+            raise ValueError("missing_key_mode: conflicting explicit modes")
+        if distinct_updates:
+            active_mode = distinct_updates.pop()
+        result[model.measures[index].index] = active_mode
+    return result
+
+
+def _notation_contexts(model, tonic: str | None) -> dict[int, tuple[str, str]]:
+    """Resolve active movable-notation tonic and mode for each measure."""
+    explicit_modes = _explicit_modes_by_measure(model)
+    has_key_signature = any(measure.fifths is not None for measure in model.measures)
+    active_mode: str | None = None
+    active_tonic = tonic
+    contexts: dict[int, tuple[str, str]] = {}
+    for measure in sorted(model.measures, key=lambda item: item.index):
+        measure_mode = explicit_modes.get(measure.index)
+        if measure_mode is not None:
+            if measure_mode not in ("major", "minor"):
+                raise ValueError("missing_key_mode: unsupported explicit key mode")
+            if measure_mode != active_mode or active_tonic is None:
+                active_mode = measure_mode
+                if tonic is None:
+                    table = _MAJOR_TONICS if active_mode == "major" else _MINOR_TONICS
+                    active_tonic = table.get(measure.fifths)
+                    if active_tonic is None:
+                        raise ValueError("missing_tonic: unsupported key signature")
+            else:
+                active_mode = measure_mode
+        elif active_mode is None and tonic is not None:
+            active_mode = "major"
+
+        if tonic is not None:
+            active_tonic = tonic
+        if active_mode is None:
+            code = "missing_key_mode" if has_key_signature else "missing_tonic"
+            raise ValueError(f"{code}: movable notation requires an explicit key context")
+        if active_tonic is None:
+            raise ValueError("missing_tonic: movable notation requires a clear key context")
+        contexts[measure.index] = (active_tonic, active_mode)
+    return contexts
+
+
+def _relative_major_tonic(minor_tonic: str) -> str:
+    natural_semitones = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
+    steps = "CDEFGAB"
+    step = minor_tonic[0]
+    alter = 1 if minor_tonic.endswith("#") else -1 if minor_tonic.endswith("b") else 0
+    major_step = steps[(steps.index(step) + 2) % len(steps)]
+    target_pitch_class = (natural_semitones[step] + alter + 3) % 12
+    major_alter = (target_pitch_class - natural_semitones[major_step]) % 12
+    if major_alter > 6:
+        major_alter -= 12
+    accidental = "#" * major_alter if major_alter > 0 else "b" * -major_alter
+    return f"{major_step}{accidental}"
 
 
 def _pitch_token(pitch, *, mode: str, tonic: str | None, key_mode: str | None) -> str:
-    degree, octave = map_pitch(
-        pitch,
-        tonic=tonic,
-        key_mode=key_mode,
-        notation=mode,
-    )
+    if mode == "movable" and key_mode == "minor":
+        relative_degree, _ = map_pitch(
+            pitch, tonic=tonic, key_mode="minor", notation=mode
+        )
+        prefix = relative_degree.rstrip("0123456789")
+        relative_major_degree = int(relative_degree[len(prefix):])
+        minor_degree = (relative_major_degree + 1) % 7 + 1
+        _, octave = map_pitch(
+            pitch,
+            tonic=_relative_major_tonic(tonic),
+            key_mode="major",
+            notation=mode,
+        )
+        degree = f"{prefix}{minor_degree}"
+    else:
+        degree, octave = map_pitch(
+            pitch,
+            tonic=tonic,
+            key_mode=key_mode,
+            notation=mode,
+        )
     octave_suffix = f"^{octave}" if octave > 0 else f"v{-octave}" if octave < 0 else ""
     return f"{degree}{octave_suffix}"
 
@@ -207,20 +318,17 @@ def musicxml_to_jianpu_text(
     """Return an auditable JSONL row for each part header and source event.
 
     Event keys are ``part``, ``measure``, ``staff``, ``voice``, local ``onset``,
-    positive ``duration``, ``kind``, ``pitches``, per-pitch ``ties``, structured
-    ``lyrics``, and ``grace``. Pitch and tie arrays stay parallel for chords;
-    lyric strings are JSON-escaped without loss. Grace duration ``1`` is only a
-    display sentinel; consumers must treat ``grace=true`` as zero-time.
-    Movable notation anchors to the score's first explicit key context. A later
-    key-signature-only change does not by itself imply a new tonic/modulation.
+    Fraction ``duration``, ``kind``, mapped ``pitches``, source
+    ``written_pitches``, per-pitch ``ties``, structured ``lyrics``, and ``grace``.
+    Pitch and tie arrays stay parallel for chords; lyric strings are JSON-escaped
+    without loss. Grace events retain their model duration and occupy no time.
+    Movable notation uses the active explicit mode of each measure. A change in
+    key-signature fifths alone does not imply a new tonic/modulation.
     """
     if mode not in ("movable", "fixed"):
         raise ValueError("mode must be 'movable' or 'fixed'")
     model = _validated_model(xml_path)
-    resolved_tonic: str | None = None
-    key_mode: str | None = None
-    if mode == "movable":
-        resolved_tonic, key_mode = _notation_key(model, tonic)
+    notation_contexts = _notation_contexts(model, tonic) if mode == "movable" else {}
 
     measure_numbers = {measure.index: measure.number for measure in model.measures}
     lines: list[str] = []
@@ -235,18 +343,26 @@ def musicxml_to_jianpu_text(
             key=lambda item: (item.measure_index, item.onset, item.staff_number, item.voice_id),
         )
         for event in ordered_events:
+            written_pitches = [
+                f"{pitch.step}{'#' * pitch.alter if pitch.alter > 0 else 'b' * -pitch.alter}{pitch.octave}"
+                for pitch in event.written_pitches
+            ]
             if event.kind == "rest":
                 pitch_tokens: str | list[str] = "0"
                 tie_states: list[str] = []
             else:
+                sounding_pitches = event.effective_sounding_pitches
+                event_tonic, event_key_mode = notation_contexts.get(
+                    event.measure_index, (tonic, None)
+                )
                 pitch_tokens_list = [
                     _pitch_token(
                         pitch,
                         mode=mode,
-                        tonic=resolved_tonic,
-                        key_mode=key_mode,
+                        tonic=event_tonic,
+                        key_mode=event_key_mode,
                     )
-                    for pitch in event.pitches
+                    for pitch in sounding_pitches
                 ]
                 pitch_tokens = (
                     pitch_tokens_list if event.kind == "chord" else pitch_tokens_list[0]
@@ -269,9 +385,10 @@ def musicxml_to_jianpu_text(
                     "staff": event.staff_number,
                     "voice": event.voice_id,
                     "onset": _fraction_text(event.onset),
-                    "duration": "1" if event.grace else _fraction_text(event.duration),
+                    "duration": _fraction_text(event.duration),
                     "kind": event.kind,
                     "pitches": pitch_tokens,
+                    "written_pitches": written_pitches,
                     "ties": tie_states,
                     "lyrics": lyric_values,
                     "grace": event.grace,
