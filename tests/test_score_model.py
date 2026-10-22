@@ -295,6 +295,7 @@ class MusicXmlParsingTests(unittest.TestCase):
         self.assertEqual(1, model.measures[0].fifths)
         self.assertEqual("major", model.measures[0].mode)
         self.assertEqual((4, 4), (model.measures[0].beats, model.measures[0].beat_type))
+        self.assertEqual(2, len(model.measures))
         self.assertTrue(
             all(
                 event.sounding_pitches
@@ -362,10 +363,28 @@ class MusicXmlParsingTests(unittest.TestCase):
             ],
             [(event.kind, event.onset, event.duration) for event in second_measure],
         )
+        expected_pitches = [
+            (Pitch("D", 0, 5),),
+            (Pitch("E", 0, 5),),
+            (Pitch("F", 1, 5),),
+        ]
         self.assertEqual(
-            [Pitch("D", 0, 5), Pitch("E", 0, 5), Pitch("F", 1, 5)],
-            [event.pitches[0] for event in second_measure[:3]],
+            [(pitches, pitches) for pitches in expected_pitches],
+            [(event.pitches, event.sounding_pitches) for event in second_measure[:3]],
         )
+        self.assertTrue(
+            all(
+                event.duration == Fraction(1, 3) and event.onset == Fraction(index, 3)
+                for index, event in enumerate(second_measure[:3])
+            )
+        )
+        self.assertEqual((), second_measure[3].pitches)
+        self.assertEqual((), second_measure[3].sounding_pitches)
+        measure_context = model.measures[1]
+        self.assertEqual((1, "major"), (measure_context.fifths, measure_context.mode))
+        self.assertEqual((4, 4), (measure_context.beats, measure_context.beat_type))
+        self.assertEqual(Fraction(4), measure_context.duration)
+        self.assertFalse(measure_context.pickup)
 
     def test_mxl_archive_is_parsed_directly_and_retained_verbatim(self):
         from pathlib import Path
