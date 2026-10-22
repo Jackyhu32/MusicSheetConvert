@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from fractions import Fraction
 from pathlib import Path
 
 from reportlab.lib.pagesizes import A4, landscape
@@ -83,6 +84,16 @@ def _event_token(
     return "+".join(tokens)
 
 
+def event_x(
+    onset: Fraction,
+    measure_duration: Fraction,
+    measure_x: float,
+    measure_width: float,
+) -> float:
+    """Return a beat-proportional x coordinate within a measure."""
+    return measure_x + float(onset / measure_duration) * measure_width
+
+
 def render_jianpu_pdf(
     score: ScoreModel,
     output_path: str | Path,
@@ -116,30 +127,73 @@ def render_jianpu_pdf(
     pdf.setFont("Helvetica-Bold", 18)
     pdf.drawCentredString(page_width / 2, page_height - 42, document_title)
 
-    y = page_height - 86
-    for part in score.parts:
-        ordered_events = sorted(
-            part.events,
-            key=lambda event: (
-                event.measure_index,
-                event.onset,
-                event.staff_number,
-                event.voice_id,
-            ),
-        )
-        tokens = [
-            _event_token(
-                event,
-                notation=notation,
-                context=contexts.get(event.measure_index),
+    measures = sorted(score.measures, key=lambda item: item.index)
+    measure_layout = {
+        measure.index: (position, measure)
+        for position, measure in enumerate(measures)
+    }
+    system_x = 150.0
+    system_right = page_width - 36.0
+    measure_width = (system_right - system_x) / len(measures) if measures else 0.0
+    row_y = [page_height - 86 - 54 * index for index in range(len(score.parts))]
+
+    # Draw system-wide measure markers once, rather than once for each voice.
+    if measures and row_y:
+        system_top = row_y[0] + 18
+        system_bottom = row_y[-1] - 18
+        pdf.setFont("Helvetica", 9)
+        pdf.setLineWidth(0.7)
+        for position, measure in enumerate(measures):
+            measure_x = system_x + position * measure_width
+            pdf.drawString(measure_x, system_top + 4, measure.number)
+            pdf.line(
+                measure_x + measure_width,
+                system_top,
+                measure_x + measure_width,
+                system_bottom,
             )
-            for event in ordered_events
-        ]
+
+    for part_index, part in enumerate(score.parts):
+        y = row_y[part_index]
         pdf.setFont("Helvetica-Bold", 11)
         pdf.drawString(36, y, part.name)
         pdf.setFont("Helvetica", 11)
-        pdf.drawString(120, y, " ".join(tokens))
-        y -= 54
+
+        voice_events: dict[tuple[int, str], list[ScoreEvent]] = {}
+        for event in part.events:
+            voice_events.setdefault(
+                (event.measure_index, event.voice_id), []
+            ).append(event)
+        voice_ids = sorted({voice_id for _, voice_id in voice_events})
+        voice_lanes = {voice_id: lane for lane, voice_id in enumerate(voice_ids)}
+
+        ordered_groups = sorted(
+            voice_events.items(),
+            key=lambda item: (item[0][0], item[0][1]),
+        )
+        for (measure_index, voice_id), events in ordered_groups:
+            position, measure = measure_layout[measure_index]
+            measure_x = system_x + position * measure_width
+            lane_y = y - voice_lanes[voice_id] * 10
+            for event in sorted(
+                events,
+                key=lambda item: (item.onset, item.staff_number),
+            ):
+                token = _event_token(
+                    event,
+                    notation=notation,
+                    context=contexts.get(event.measure_index),
+                )
+                pdf.drawString(
+                    event_x(
+                        event.onset,
+                        measure.duration,
+                        measure_x,
+                        measure_width,
+                    ),
+                    lane_y,
+                    token,
+                )
 
     pdf.save()
     if not output.is_file() or output.stat().st_size == 0:
