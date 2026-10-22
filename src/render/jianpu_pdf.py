@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import unicodedata
 from fractions import Fraction
 from pathlib import Path
 
@@ -141,14 +142,19 @@ def _duration_marks(duration: Fraction) -> tuple[int, int, int]:
 
 
 def _contains_cjk(text: str) -> bool:
+    script_name_prefixes = (
+        "CJK UNIFIED IDEOGRAPH-",
+        "CJK COMPATIBILITY IDEOGRAPH-",
+        "HIRAGANA",
+        "KATAKANA",
+        "HALFWIDTH KATAKANA",
+        "HANGUL",
+        "BOPOMOFO",
+        "KANGXI RADICAL",
+        "IDEOGRAPHIC",
+    )
     return any(
-        0x3400 <= ord(char) <= 0x4DBF
-        or 0x4E00 <= ord(char) <= 0x9FFF
-        or 0xF900 <= ord(char) <= 0xFAFF
-        or 0x20000 <= ord(char) <= 0x2FA1F
-        or 0x3040 <= ord(char) <= 0x30FF
-        or 0xAC00 <= ord(char) <= 0xD7AF
-        for char in text
+        unicodedata.name(char, "").startswith(script_name_prefixes) for char in text
     )
 
 
@@ -180,9 +186,28 @@ def _lyrics_font(score: ScoreModel, font_path: str | Path | None) -> str:
     try:
         if font_name not in pdfmetrics.getRegisteredFontNames():
             pdfmetrics.registerFont(TTFont(font_name, str(path)))
+        registered_font = pdfmetrics.getFont(font_name)
+        character_map = registered_font.face.charToGlyph
+        missing_characters = sorted(
+            {
+                char
+                for text in lyric_texts
+                for char in text
+                if character_map.get(ord(char), 0) == 0
+            },
+            key=ord,
+        )
+        if missing_characters:
+            missing = ", ".join(
+                f"{char!r} (U+{ord(char):04X})" for char in missing_characters
+            )
+            raise RuntimeError(
+                f"configured CJK font is missing required glyphs: {missing}"
+            )
         for text in lyric_texts:
-            if _contains_cjk(text):
-                stringWidth(text, font_name, 8)
+            stringWidth(text, font_name, 8)
+    except RuntimeError:
+        raise
     except Exception as error:
         raise RuntimeError(
             f"CJK font configured by font_path/JIANPU_CJK_FONT cannot render lyrics: {path}"
@@ -242,12 +267,89 @@ def _tie_pairs(score: ScoreModel):
                         "in its staff and voice"
                     )
                 target, target_index = matches[0]
-                if target.measure_index != event.measure_index:
-                    raise ValueError(
-                        "ties crossing a barline cannot be drawn without intersecting it"
-                    )
                 result.append((part_index, event, target, pitch_index, target_index))
     return result
+
+
+def _slur_pairs(score: ScoreModel):
+    result = []
+    for part_index, part in enumerate(score.parts):
+        lanes: dict[tuple[str, str], list[ScoreEvent]] = {}
+        for event in part.events:
+            lanes.setdefault((event.staff_number, event.voice_id), []).append(event)
+        for lane, events in lanes.items():
+            ordered = sorted(
+                events,
+                key=lambda event: (event.measure_index, event.onset, event.duration),
+            )
+            active: dict[str, ScoreEvent] = {}
+            for event in ordered:
+                marks = event.slurs
+                for state, number in marks:
+                    if state not in ("stop", "continue"):
+                        continue
+                    source = active.pop(number, None)
+                    if source is None:
+                        raise ValueError(
+                            f"slur {number!r} stops without a matching start in "
+                            f"part {part.id}, staff {lane[0]}, voice {lane[1]}"
+                        )
+                    if source is event:
+                        raise ValueError(
+                            "slur continuation cannot start and stop on one event"
+                        )
+                    result.append((part_index, source, event))
+                for state, number in marks:
+                    if state not in ("start", "continue"):
+                        continue
+                    if number in active:
+                        raise ValueError(
+                            f"slur {number!r} starts twice before it stops in "
+                            f"part {part.id}, staff {lane[0]}, voice {lane[1]}"
+                        )
+                    active[number] = event
+            if active:
+                number = next(iter(active))
+                raise ValueError(
+                    f"slur {number!r} has no matching stop in "
+                    f"part {part.id}, staff {lane[0]}, voice {lane[1]}"
+                )
+    return result
+
+
+def _measure_groups(measures, maximum, relationships):
+    if not measures:
+        return [[]]
+    measure_positions = {
+        measure.index: position for position, measure in enumerate(measures)
+    }
+    intervals = [
+        (
+            measure_positions[source.measure_index],
+            measure_positions[target.measure_index],
+        )
+        for source, target in relationships
+    ]
+    groups = []
+    offset = 0
+    while offset < len(measures):
+        end = min(offset + maximum, len(measures))
+        while True:
+            crossing = [
+                (start, stop)
+                for start, stop in intervals
+                if start < end <= stop and start >= offset
+            ]
+            if not crossing:
+                break
+            earliest_start = min(start for start, _stop in crossing)
+            if earliest_start > offset:
+                end = earliest_start
+            else:
+                end = max(stop for start, stop in crossing if start == offset) + 1
+        groups.append(measures[offset:end])
+        offset = end
+    return groups
 
 
 def _pitch_center(x: float, degrees: list[tuple[str, int]], pitch_index: int) -> float:
@@ -297,10 +399,13 @@ def render_jianpu_pdf(
     available_width = system_right - system_x
     minimum_measure_width = 80.0
     measures_per_system = max(1, int(available_width // minimum_measure_width))
-    measure_groups = [
-        measures[offset : offset + measures_per_system]
-        for offset in range(0, len(measures), measures_per_system)
-    ] or [[]]
+    tie_pairs = _tie_pairs(score)
+    slur_pairs = _slur_pairs(score)
+    linked_events = [
+        (source, target)
+        for _part_index, source, target, _source_pitch, _target_pitch in tie_pairs
+    ] + [(source, target) for _part_index, source, target in slur_pairs]
+    measure_groups = _measure_groups(measures, measures_per_system, linked_events)
 
     part_lane_keys = [
         sorted({(event.staff_number, event.voice_id) for event in part.events})
@@ -319,17 +424,83 @@ def render_jianpu_pdf(
         )
     row_padding = 18.0
     minimum_row_height = 54.0
+    lane_vertical_extents = []
     lane_offsets_by_part = []
     row_heights = []
     for part_index, lane_keys in enumerate(part_lane_keys):
+        part = score.parts[part_index]
+        extents: dict[tuple[str, str], list[float]] = {
+            lane: [8.0, 0.0] for lane in lane_keys
+        }
+        for event in part.events:
+            lane = (event.staff_number, event.voice_id)
+            above, below = extents[lane]
+            if not event.grace:
+                _dots, underlines, _dashes = _duration_marks(event.duration)
+                if underlines:
+                    below = max(below, 2.0 + (underlines - 1) * 2.5 + 0.5)
+            if event.lyrics:
+                verse_numbers = lane_lyric_numbers[part_index][lane]
+                for lyric in event.lyrics:
+                    verse_index = verse_numbers.index(lyric.number)
+                    below = max(below, 22.0 + verse_index * 9.0)
+            if any(state != "none" for state in event.pitch_ties):
+                below = max(below, 10.7)
+            for _degree, octave in _mapped_pitches(
+                event, notation=notation, context=contexts.get(event.measure_index)
+            ):
+                if octave > 0:
+                    above = max(above, 10.0 + (octave - 1) * 3.5 + 1.2)
+                elif octave < 0:
+                    below = max(below, 10.0 + (abs(octave) - 1) * 3.5 + 1.2)
+            extents[lane] = [above, below]
+
+        for part_slur_index, source, target in slur_pairs:
+            if part_slur_index != part_index:
+                continue
+            lane = (source.staff_number, source.voice_id)
+            high_marks = [
+                10.0 + (octave - 1) * 3.5 + 1.2
+                for event in part.events
+                if event.staff_number == lane[0]
+                and event.voice_id == lane[1]
+                and (source.measure_index, source.onset)
+                <= (event.measure_index, event.onset)
+                <= (target.measure_index, target.onset)
+                for _degree, octave in _mapped_pitches(
+                    event,
+                    notation=notation,
+                    context=contexts.get(event.measure_index),
+                )
+                if octave > 0
+            ]
+            above, below = extents[lane]
+            above = max(above, max([14.0, *(mark + 7.7 for mark in high_marks)]))
+            extents[lane] = [above, below]
+        lane_vertical_extents.append(extents)
+
         lane_offsets: dict[tuple[str, str], float] = {}
         next_offset = 0.0
-        for lane in lane_keys:
-            verse_count = len(lane_lyric_numbers[part_index].get(lane, ()))
+        for lane_index, lane in enumerate(lane_keys):
             lane_offsets[lane] = next_offset
-            next_offset += 22.0 if verse_count == 0 else 31.0 + 9.0 * (verse_count - 1)
+            if lane_index + 1 < len(lane_keys):
+                next_lane = lane_keys[lane_index + 1]
+                next_offset += max(
+                    22.0,
+                    extents[lane][1] + extents[next_lane][0] + 3.0,
+                )
         lane_offsets_by_part.append(lane_offsets)
-        row_heights.append(max(minimum_row_height, next_offset + row_padding))
+        if lane_keys:
+            last_lane = lane_keys[-1]
+            first_lane = lane_keys[0]
+            row_height = (
+                next_offset
+                + extents[last_lane][1]
+                + max(row_padding, extents[first_lane][0] + 3.0)
+            )
+        else:
+            row_height = minimum_row_height
+        row_heights.append(max(minimum_row_height, row_height))
     available_height = page_height - 86.0 - 36.0
     ensemble_height = sum(row_heights)
     if ensemble_height > available_height:
@@ -355,8 +526,6 @@ def render_jianpu_pdf(
             11,
             system_x - 36.0 - 12.0,
         )
-
-    tie_pairs = _tie_pairs(score)
 
     for measure_group in measure_groups:
         measure_width = available_width / len(measure_group) if measure_group else 0.0
@@ -446,9 +615,17 @@ def render_jianpu_pdf(
 
                     high_octave_mark = max(
                         (
+                            10.0 + (octave - 1) * 3.5 + 1.2
+                            for _degree, octave in mapped
+                            if octave > 0
+                        ),
+                        default=0.0,
+                    )
+                    low_octave_mark = max(
+                        (
                             10.0 + (abs(octave) - 1) * 3.5 + 1.2
                             for _degree, octave in mapped
-                            if octave
+                            if octave < 0
                         ),
                         default=0.0,
                     )
@@ -456,6 +633,10 @@ def render_jianpu_pdf(
                     if lane_y + high_octave_mark > page_height - 58.0:
                         raise ValueError(
                             "octave marks exceed the system's vertical bounds"
+                        )
+                    if lane_y - low_octave_mark < 36.0:
+                        raise ValueError(
+                            "octave marks exceed the page's lower vertical bounds"
                         )
                     if (
                         lane_y - max(low_underline, 10.0 if event.lyrics else 0.0)
@@ -496,34 +677,96 @@ def render_jianpu_pdf(
                             raise ValueError("lyric exceeds the page's vertical bounds")
 
     for part_index, source, target, source_pitch_index, target_pitch_index in tie_pairs:
-        # A tie is confined to one measure above, so it cannot cross this barline.
-        measure = next(item for item in measures if item.index == source.measure_index)
-        measure_position = next(
+        source_group = next(
             (
-                position
+                group
                 for group in measure_groups
-                for position, item in enumerate(group)
-                if item.index == measure.index
+                if any(item.index == source.measure_index for item in group)
             ),
             None,
         )
-        if measure_position is None:
-            continue
-        group = next(group for group in measure_groups if measure in group)
-        measure_width = available_width / len(group)
-        measure_x = system_x + measure_position * measure_width
-        source_x = event_x(source.onset, measure.duration, measure_x, measure_width)
-        target_x = event_x(target.onset, measure.duration, measure_x, measure_width)
-        if target_x <= source_x:
+        if source_group is None or not any(
+            item.index == target.measure_index for item in source_group
+        ):
+            raise ValueError(
+                "tied notes could not be placed in the same rendered system"
+            )
+        group_layout = {
+            measure.index: (position, measure)
+            for position, measure in enumerate(source_group)
+        }
+        source_position, source_measure = group_layout[source.measure_index]
+        target_position, target_measure = group_layout[target.measure_index]
+        system_measure_width = available_width / len(source_group)
+        source_x = event_x(
+            source.onset,
+            source_measure.duration,
+            system_x + source_position * system_measure_width,
+            system_measure_width,
+        )
+        target_x = event_x(
+            target.onset,
+            target_measure.duration,
+            system_x + target_position * system_measure_width,
+            system_measure_width,
+        )
+        source_degrees = _mapped_pitches(
+            source, notation=notation, context=contexts.get(source.measure_index)
+        )
+        target_degrees = _mapped_pitches(
+            target, notation=notation, context=contexts.get(target.measure_index)
+        )
+        start_x = _pitch_center(source_x, source_degrees, source_pitch_index)
+        end_x = _pitch_center(target_x, target_degrees, target_pitch_index)
+        if end_x <= start_x:
             raise ValueError("tied pitches do not have increasing page positions")
-        source_y = (
+        lane_y = (
             page_height
             - 86.0
             - sum(row_heights[:part_index])
             - lane_offsets_by_part[part_index][(source.staff_number, source.voice_id)]
         )
-        if source_y - 11.0 < 36.0:
+        if lane_y - 10.7 < 36.0:
             raise ValueError("tie curve exceeds the page's lower bounds")
+
+    for part_index, source, target in slur_pairs:
+        source_group = next(
+            (
+                group
+                for group in measure_groups
+                if any(item.index == source.measure_index for item in group)
+            ),
+            None,
+        )
+        if source_group is None or not any(
+            item.index == target.measure_index for item in source_group
+        ):
+            raise ValueError(
+                "slurred notes could not be placed in the same rendered system"
+            )
+        source_lane = (source.staff_number, source.voice_id)
+        lane_y = (
+            page_height
+            - 86.0
+            - sum(row_heights[:part_index])
+            - lane_offsets_by_part[part_index][source_lane]
+        )
+        high_marks = [
+            10.0 + (octave - 1) * 3.5 + 1.2
+            for event in score.parts[part_index].events
+            if event.staff_number == source.staff_number
+            and event.voice_id == source.voice_id
+            and (source.measure_index, source.onset)
+            <= (event.measure_index, event.onset)
+            <= (target.measure_index, target.onset)
+            for _degree, octave in _mapped_pitches(
+                event, notation=notation, context=contexts.get(event.measure_index)
+            )
+            if octave > 0
+        ]
+        slur_height = max([14.0, *(mark + 4.0 for mark in high_marks)])
+        if lane_y + slur_height + 3.7 > page_height - 58.0:
+            raise ValueError("slur curve exceeds the system's upper bounds")
 
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
@@ -548,16 +791,10 @@ def render_jianpu_pdf(
             last_part_index = len(score.parts) - 1
             last_lane_keys = part_lane_keys[last_part_index]
             last_lane = last_lane_keys[-1] if last_lane_keys else None
-            last_lane_verses = (
-                lane_lyric_numbers[last_part_index].get(last_lane, ())
+            bottom_clearance = (
+                lane_vertical_extents[last_part_index][last_lane][1] + 18.0
                 if last_lane is not None
-                else ()
-            )
-            bottom_clearance = max(
-                18.0,
-                22.0 + 9.0 * max(0, len(last_lane_verses) - 1)
-                if last_lane_verses
-                else 18.0,
+                else 18.0
             )
             system_top = row_y[0] + 18
             system_bottom = (
@@ -700,6 +937,46 @@ def render_jianpu_pdf(
                 tie_y - 3.0,
                 end_x,
                 tie_y,
+            )
+            pdf.setLineWidth(0.7)
+            pdf.drawPath(path, stroke=1, fill=0)
+
+        for part_index, source, target in slur_pairs:
+            if source.measure_index not in measure_layout:
+                continue
+            source_x, source_y, source_mapped, source_width = event_geometry[id(source)]
+            target_geometry = event_geometry[id(target)]
+            target_x = target_geometry[0]
+            target_width = target_geometry[3]
+            start_x = source_x + source_width / 2
+            end_x = target_x + target_width / 2
+            lane_events = [
+                event
+                for event in score.parts[part_index].events
+                if event.staff_number == source.staff_number
+                and event.voice_id == source.voice_id
+                and (source.measure_index, source.onset)
+                <= (event.measure_index, event.onset)
+                <= (target.measure_index, target.onset)
+            ]
+            high_marks = [
+                10.0 + (octave - 1) * 3.5 + 1.2
+                for event in lane_events
+                for _degree, octave in _mapped_pitches(
+                    event, notation=notation, context=contexts.get(event.measure_index)
+                )
+                if octave > 0
+            ]
+            slur_y = source_y + max([14.0, *(mark + 4.0 for mark in high_marks)])
+            path = pdf.beginPath()
+            path.moveTo(start_x, slur_y)
+            path.curveTo(
+                start_x + (end_x - start_x) / 3.0,
+                slur_y + 3.0,
+                start_x + 2.0 * (end_x - start_x) / 3.0,
+                slur_y + 3.0,
+                end_x,
+                slur_y,
             )
             pdf.setLineWidth(0.7)
             pdf.drawPath(path, stroke=1, fill=0)

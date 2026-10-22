@@ -903,6 +903,30 @@ class JianpuPdfTests(unittest.TestCase):
 
             self.assertFalse(output.exists())
 
+    def test_keeps_cross_measure_tie_together_at_normal_page_break(self):
+        c4 = Pitch("C", 0, 4)
+        sequence = [[(Fraction(4), "rest", (), (), ())] for _ in range(7)]
+        sequence.extend(
+            [
+                [
+                    (Fraction(3), "rest", (), (), ()),
+                    (Fraction(1), "note", (c4,), ("start",), ()),
+                ],
+                [
+                    (Fraction(1), "note", (c4,), ("stop",), ()),
+                    (Fraction(3), "rest", (), (), ()),
+                ],
+            ]
+        )
+        score = score_from_sequence(sequence, duration=(Fraction(4),) * 9)
+
+        canvas = render_with_canvas_spy(score)
+
+        self.assertEqual(1, canvas.page_breaks)
+        self.assertEqual(1, len(canvas.path_calls))
+        path_commands = canvas.path_calls[0][0]
+        self.assertLess(path_commands[0][1], path_commands[1][-2])
+
     def test_canvas_places_numbered_lyrics_on_distinct_verse_rows(self):
         score = score_from_sequence(
             [
@@ -931,7 +955,7 @@ class JianpuPdfTests(unittest.TestCase):
         self.assertEqual({"first", "second"}, set(verse_rows))
         self.assertNotEqual(verse_rows["first"], verse_rows["second"])
 
-    def test_rejects_cross_barline_ties_before_creating_output(self):
+    def test_draws_a_tie_across_a_measure_barline(self):
         c4 = Pitch("C", 0, 4)
         score = score_from_sequence(
             [
@@ -940,13 +964,166 @@ class JianpuPdfTests(unittest.TestCase):
             ],
             duration=(Fraction(1), Fraction(1)),
         )
-        with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory) / "cross-bar-tie.pdf"
 
-            with self.assertRaisesRegex(ValueError, "ties crossing a barline"):
+        canvas = render_with_canvas_spy(score)
+
+        self.assertEqual(1, len(canvas.path_calls))
+
+    def test_rejects_downward_octave_dots_that_leave_page(self):
+        measure = MeasureContext(0, "1", Fraction(4), 0, "major", 4, 4)
+        parts = []
+        for part_index in range(6):
+            part = ScorePart(f"P{part_index}", f"Part {part_index}")
+            lane_numbers = range(1, 9) if part_index == 5 else range(1, 2)
+            for lane_number in lane_numbers:
+                pitch = Pitch("C", 0, -40) if lane_number == 8 else Pitch("C", 0, 4)
+                part.events.append(
+                    ScoreEvent(
+                        part.id,
+                        0,
+                        str(lane_number),
+                        Fraction(0),
+                        Fraction(4),
+                        "note",
+                        pitches=(pitch,),
+                        sounding_pitches=(pitch,),
+                    )
+                )
+            parts.append(part)
+        score = ScoreModel("Downward Bounds", parts, [measure])
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "downward-octave-overflow.pdf"
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "octave marks.*vertical bounds|ensemble lane layout cannot fit",
+            ):
                 render_jianpu_pdf(score, output, notation="fixed")
 
             self.assertFalse(output.exists())
+
+    def test_octave_dots_on_adjacent_lanes_do_not_overlap(self):
+        measure = MeasureContext(0, "1", Fraction(4), 0, "major", 4, 4)
+        upper = Pitch("C", 0, 3)
+        lower = Pitch("C", 0, 5)
+        part = ScorePart(
+            "P",
+            "Two Voices",
+            events=[
+                ScoreEvent(
+                    "P",
+                    0,
+                    "1",
+                    Fraction(0),
+                    Fraction(4),
+                    "note",
+                    pitches=(upper,),
+                    sounding_pitches=(upper,),
+                ),
+                ScoreEvent(
+                    "P",
+                    0,
+                    "2",
+                    Fraction(0),
+                    Fraction(4),
+                    "note",
+                    pitches=(lower,),
+                    sounding_pitches=(lower,),
+                ),
+            ],
+        )
+        score = ScoreModel("Lane Marks", [part], [measure])
+
+        canvas = render_with_canvas_spy(score)
+        centers = [
+            (x, y)
+            for x, y, radius, _stroke, fill in canvas.circle_calls
+            if fill and radius == 1.2
+        ]
+
+        self.assertEqual(2, len(centers))
+        self.assertGreater(abs(centers[0][1] - centers[1][1]), 2.4)
+
+    def test_extension_g_lyrics_require_cjk_font(self):
+        score = score_from_sequence(
+            [
+                [
+                    (
+                        Fraction(4),
+                        "note",
+                        (Pitch("C", 0, 4),),
+                        (),
+                        (Lyric("\U00030000"),),
+                    ),
+                ]
+            ]
+        )
+        with (
+            patch.dict("os.environ", {"JIANPU_CJK_FONT": ""}),
+            tempfile.TemporaryDirectory() as directory,
+        ):
+            output = Path(directory) / "extension-g.pdf"
+
+            with self.assertRaisesRegex(RuntimeError, "CJK lyrics require"):
+                render_jianpu_pdf(score, output, notation="fixed")
+
+            self.assertFalse(output.exists())
+
+    def test_rejects_configured_font_missing_a_required_cjk_glyph(self):
+        font_path = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+        if not font_path.is_file():
+            self.skipTest("DejaVu Sans is not available")
+        score = score_from_sequence(
+            [
+                [
+                    (Fraction(4), "note", (Pitch("C", 0, 4),), (), (Lyric("春"),)),
+                ]
+            ]
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "missing-glyph.pdf"
+
+            with self.assertRaisesRegex(RuntimeError, "missing.*glyph|glyph.*missing"):
+                render_jianpu_pdf(score, output, notation="fixed", font_path=font_path)
+
+            self.assertFalse(output.exists())
+
+    def test_canvas_draws_explicit_slur_independent_of_tie_state(self):
+        c4 = Pitch("C", 0, 4)
+        score = score_from_sequence(
+            [
+                [
+                    (Fraction(2), "note", (c4,), (), ()),
+                    (Fraction(2), "note", (Pitch("D", 0, 4),), (), ()),
+                ]
+            ]
+        )
+        score.parts[0].events = [
+            replace(score.parts[0].events[0], slurs=(("start", "1"),)),
+            replace(score.parts[0].events[1], slurs=(("stop", "1"),)),
+        ]
+
+        canvas = render_with_canvas_spy(score)
+
+        self.assertEqual(1, len(canvas.path_calls))
+
+    def test_canvas_draws_satbb_tie_arc_across_adjacent_measure_barline(self):
+        score = load_musicxml(self.fixture("satbb-two-measures.musicxml"))
+        canvas = render_with_canvas_spy(score)
+
+        self.assertTrue(
+            any(
+                event.measure_index == 0 and "start" in event.pitch_ties
+                for event in score.parts[0].events
+            )
+        )
+        self.assertTrue(
+            any(
+                event.measure_index == 1 and "stop" in event.pitch_ties
+                for event in score.parts[0].events
+            )
+        )
+        self.assertGreaterEqual(len(canvas.path_calls), 1)
 
     def test_cjk_lyrics_use_the_explicit_font_and_remain_extractable(self):
         font_path = Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc")
