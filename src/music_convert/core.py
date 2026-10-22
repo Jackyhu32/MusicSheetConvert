@@ -12,22 +12,20 @@ occupies no musical time. Fractions are rendered as integers or
 MusicXML is parsed to a ScoreModel once for conversion. Semantic validation is
 blocking for both text and MIDI output.
 """
+
 from __future__ import annotations
 
+import json
 from dataclasses import dataclass
 from fractions import Fraction
-from io import BytesIO
-import json
 from math import lcm
 from pathlib import Path
-from typing import Optional
-import xml.etree.ElementTree as ET
-import zipfile
 
 import music21
 import pretty_midi
 
 from .jianpu import map_pitch
+from .model import ScoreModel
 from .musicxml_io import load_musicxml
 from .validation import validate_score
 
@@ -37,19 +35,11 @@ class ConvertOptions:
     """Common conversion options."""
 
     bpm: int = 90
-    title: Optional[str] = None
-    composer: Optional[str] = None
+    title: str | None = None
+    composer: str | None = None
 
 
 # ---------- MusicXML <-> MIDI ----------
-
-def _validated_model(xml_path: str | Path):
-    model = load_musicxml(xml_path)
-    issues = validate_score(model)
-    if issues:
-        codes = ", ".join(dict.fromkeys(issue.code for issue in issues))
-        raise ValueError(f"score validation failed: {codes}")
-    return model
 
 
 def _midi_pitch(pitch) -> int:
@@ -85,11 +75,22 @@ def _resolution_for_score(model, measure_starts: dict[int, Fraction]) -> int:
     return resolution
 
 
-def musicxml_to_midi(xml_path: str | Path, midi_path: str | Path,
-                     options: ConvertOptions | None = None) -> Path:
+def musicxml_to_midi(
+    xml_path: str | Path, midi_path: str | Path, options: ConvertOptions | None = None
+) -> Path:
+    """Convert a MusicXML file to MIDI after parsing it into a score model."""
+    return score_model_to_midi(load_musicxml(xml_path), midi_path, options)
+
+
+def score_model_to_midi(
+    model: ScoreModel, midi_path: str | Path, options: ConvertOptions | None = None
+) -> Path:
     """Convert validated ScoreModel events to MIDI, retaining parts and voices."""
     options = options or ConvertOptions()
-    model = _validated_model(xml_path)
+    issues = validate_score(model)
+    if issues:
+        codes = ", ".join(dict.fromkeys(issue.code for issue in issues))
+        raise ValueError(f"score validation failed: {codes}")
     bpm = model.tempo_bpm or options.bpm
     if bpm <= 0:
         raise ValueError("tempo must be positive")
@@ -130,24 +131,27 @@ def musicxml_to_midi(xml_path: str | Path, midi_path: str | Path,
                         starts = pending_ties.get(midi_pitch, [])
                         if starts:
                             tie_start = starts.pop(0)
-                            track.notes.append(pretty_midi.Note(
-                                velocity=80,
-                                pitch=midi_pitch,
-                                start=_seconds(tie_start, bpm),
-                                end=_seconds(absolute_end, bpm),
-                            ))
+                            track.notes.append(
+                                pretty_midi.Note(
+                                    velocity=80,
+                                    pitch=midi_pitch,
+                                    start=_seconds(tie_start, bpm),
+                                    end=_seconds(absolute_end, bpm),
+                                )
+                            )
                             if not starts:
                                 pending_ties.pop(midi_pitch, None)
                     elif state == "continue":
-                        # The pending start remains open through tie continuations.
                         continue
                     else:
-                        track.notes.append(pretty_midi.Note(
-                            velocity=80,
-                            pitch=midi_pitch,
-                            start=_seconds(absolute_onset, bpm),
-                            end=_seconds(absolute_end, bpm),
-                        ))
+                        track.notes.append(
+                            pretty_midi.Note(
+                                velocity=80,
+                                pitch=midi_pitch,
+                                start=_seconds(absolute_onset, bpm),
+                                end=_seconds(absolute_end, bpm),
+                            )
+                        )
             pm.instruments.append(track)
 
     midi_path = Path(midi_path)
@@ -156,8 +160,9 @@ def musicxml_to_midi(xml_path: str | Path, midi_path: str | Path,
     return midi_path
 
 
-def midi_to_musicxml(midi_path: str | Path, xml_path: str | Path,
-                     options: ConvertOptions | None = None) -> Path:
+def midi_to_musicxml(
+    midi_path: str | Path, xml_path: str | Path, options: ConvertOptions | None = None
+) -> Path:
     """Convert a MIDI file to a MusicXML file.
 
     music21's MIDI parser reconstructs a best-effort part/measure structure.
@@ -174,92 +179,55 @@ def midi_to_musicxml(midi_path: str | Path, xml_path: str | Path,
 # ---------- Numbered notation (jianpu) ----------
 
 _MAJOR_TONICS = {
-    -7: "Cb", -6: "Gb", -5: "Db", -4: "Ab", -3: "Eb", -2: "Bb",
-    -1: "F", 0: "C", 1: "G", 2: "D", 3: "A", 4: "E", 5: "B",
-    6: "F#", 7: "C#",
+    -7: "Cb",
+    -6: "Gb",
+    -5: "Db",
+    -4: "Ab",
+    -3: "Eb",
+    -2: "Bb",
+    -1: "F",
+    0: "C",
+    1: "G",
+    2: "D",
+    3: "A",
+    4: "E",
+    5: "B",
+    6: "F#",
+    7: "C#",
 }
 _MINOR_TONICS = {
-    -7: "Ab", -6: "Eb", -5: "Bb", -4: "F", -3: "C", -2: "G",
-    -1: "D", 0: "A", 1: "E", 2: "B", 3: "F#", 4: "C#",
-    5: "G#", 6: "D#", 7: "A#",
+    -7: "Ab",
+    -6: "Eb",
+    -5: "Bb",
+    -4: "F",
+    -3: "C",
+    -2: "G",
+    -1: "D",
+    0: "A",
+    1: "E",
+    2: "B",
+    3: "F#",
+    4: "C#",
+    5: "G#",
+    6: "D#",
+    7: "A#",
 }
 
 
-def _xml_local_name(element: ET.Element) -> str:
-    return element.tag.rsplit("}", 1)[-1]
-
-
-def _source_xml_root(source: bytes | None) -> ET.Element | None:
-    if source is None:
-        return None
-    try:
-        if not zipfile.is_zipfile(BytesIO(source)):
-            return ET.fromstring(source)
-        with zipfile.ZipFile(BytesIO(source)) as archive:
-            names = archive.namelist()
-            root_path = None
-            if "META-INF/container.xml" in names:
-                container = ET.fromstring(archive.read("META-INF/container.xml"))
-                rootfile = next(
-                    (item for item in container.iter()
-                     if _xml_local_name(item) == "rootfile"),
-                    None,
-                )
-                root_path = rootfile.get("full-path") if rootfile is not None else None
-            if root_path not in names:
-                root_path = next(
-                    (name for name in names
-                     if name.lower().endswith((".musicxml", ".xml"))
-                     and not name.lower().startswith("meta-inf/")),
-                    None,
-                )
-            return ET.fromstring(archive.read(root_path)) if root_path else None
-    except (ET.ParseError, OSError, zipfile.BadZipFile, KeyError):
-        return None
-
-
-def _explicit_modes_by_measure(model) -> dict[int, str | None]:
-    """Read explicit MusicXML mode changes without inferring from fifths."""
-    root = _source_xml_root(model.source_musicxml)
-    parts = (
-        [item for item in root if _xml_local_name(item) == "part"]
-        if root is not None else []
-    )
-    active_mode: str | None = None
-    result: dict[int, str | None] = {}
-    for index in range(len(model.measures)):
-        updates = []
-        for part in parts:
-            measures = [item for item in part if _xml_local_name(item) == "measure"]
-            if index >= len(measures):
-                continue
-            for attributes in measures[index]:
-                if _xml_local_name(attributes) != "attributes":
-                    continue
-                for key_element in attributes:
-                    if _xml_local_name(key_element) != "key":
-                        continue
-                    for child in key_element:
-                        if _xml_local_name(child) == "mode" and child.text:
-                            updates.append(child.text.strip().lower())
-        distinct_updates = set(updates)
-        if len(distinct_updates) > 1:
-            raise ValueError("missing_key_mode: conflicting explicit modes")
-        if distinct_updates:
-            active_mode = distinct_updates.pop()
-        result[model.measures[index].index] = active_mode
-    return result
+def _modes_by_measure(model: ScoreModel) -> dict[int, str | None]:
+    """Read the active key mode retained in each parsed measure context."""
+    return {measure.index: measure.mode for measure in model.measures}
 
 
 def _notation_contexts(model, tonic: str | None) -> dict[int, tuple[str, str]]:
     """Resolve active movable-notation tonic and mode for each measure."""
-    explicit_modes = _explicit_modes_by_measure(model)
+    measure_modes = _modes_by_measure(model)
     has_key_signature = any(measure.fifths is not None for measure in model.measures)
     active_mode: str | None = None
     active_tonic = tonic
     contexts: dict[int, tuple[str, str]] = {}
     for measure in sorted(model.measures, key=lambda item: item.index):
-        measure_mode = explicit_modes.get(measure.index)
+        measure_mode = measure_modes.get(measure.index)
         if measure_mode is not None:
             if measure_mode not in ("major", "minor"):
                 raise ValueError("missing_key_mode: unsupported explicit key mode")
@@ -280,9 +248,13 @@ def _notation_contexts(model, tonic: str | None) -> dict[int, tuple[str, str]]:
                 if tonic is None and not has_key_signature
                 else "missing_key_mode"
             )
-            raise ValueError(f"{code}: movable notation requires an explicit key context")
+            raise ValueError(
+                f"{code}: movable notation requires an explicit key context"
+            )
         if active_tonic is None:
-            raise ValueError("missing_tonic: movable notation requires a clear key context")
+            raise ValueError(
+                "missing_tonic: movable notation requires a clear key context"
+            )
         contexts[measure.index] = (active_tonic, active_mode)
     return contexts
 
@@ -299,38 +271,50 @@ def _pitch_token(pitch, *, mode: str, tonic: str | None, key_mode: str | None) -
 
 
 def _fraction_text(value: Fraction) -> str:
-    return str(value.numerator) if value.denominator == 1 else f"{value.numerator}/{value.denominator}"
+    return (
+        str(value.numerator)
+        if value.denominator == 1
+        else f"{value.numerator}/{value.denominator}"
+    )
 
 
 def musicxml_to_jianpu_text(
     xml_path: str | Path, *, mode: str = "movable", tonic: str | None = None
 ) -> str:
-    """Return an auditable JSONL row for each part header and source event.
+    """Return auditable Jianpu JSONL after parsing MusicXML into a score model."""
+    return score_model_to_jianpu_text(load_musicxml(xml_path), mode=mode, tonic=tonic)
 
-    Event keys are ``part``, ``measure``, ``staff``, ``voice``, local ``onset``,
-    Fraction ``duration``, ``kind``, mapped ``pitches``, source
-    ``written_pitches``, per-pitch ``ties``, structured ``lyrics``, and ``grace``.
-    Pitch and tie arrays stay parallel for chords; lyric strings are JSON-escaped
-    without loss. Grace events retain their model duration and occupy no time.
-    Movable notation uses the active explicit mode of each measure. A change in
-    key-signature fifths alone does not imply a new tonic/modulation.
-    """
+
+def score_model_to_jianpu_text(
+    model: ScoreModel, *, mode: str = "movable", tonic: str | None = None
+) -> str:
+    """Return an auditable JSONL row for each part header and source event."""
     if mode not in ("movable", "fixed"):
         raise ValueError("mode must be 'movable' or 'fixed'")
-    model = _validated_model(xml_path)
+    issues = validate_score(model)
+    if issues:
+        codes = ", ".join(dict.fromkeys(issue.code for issue in issues))
+        raise ValueError(f"score validation failed: {codes}")
     notation_contexts = _notation_contexts(model, tonic) if mode == "movable" else {}
 
     measure_numbers = {measure.index: measure.number for measure in model.measures}
     lines: list[str] = []
     for part in model.parts:
-        lines.append(json.dumps(
-            {"type": "part", "part": part.id, "name": part.name},
-            ensure_ascii=False,
-            separators=(",", ":"),
-        ))
+        lines.append(
+            json.dumps(
+                {"type": "part", "part": part.id, "name": part.name},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+        )
         ordered_events = sorted(
             part.events,
-            key=lambda item: (item.measure_index, item.onset, item.staff_number, item.voice_id),
+            key=lambda item: (
+                item.measure_index,
+                item.onset,
+                item.staff_number,
+                item.voice_id,
+            ),
         )
         for event in ordered_events:
             written_pitches = [
@@ -357,7 +341,9 @@ def musicxml_to_jianpu_text(
                 pitch_tokens = (
                     pitch_tokens_list if event.kind == "chord" else pitch_tokens_list[0]
                 )
-                tie_states = list(event.pitch_ties or ("none",) * len(pitch_tokens_list))
+                tie_states = list(
+                    event.pitch_ties or ("none",) * len(pitch_tokens_list)
+                )
             lyric_values = [
                 {
                     "text": lyric.text,
@@ -367,30 +353,35 @@ def musicxml_to_jianpu_text(
                 }
                 for lyric in event.lyrics
             ]
-            lines.append(json.dumps(
-                {
-                    "type": "event",
-                    "part": event.part_id,
-                    "measure": measure_numbers.get(event.measure_index, str(event.measure_index)),
-                    "staff": event.staff_number,
-                    "voice": event.voice_id,
-                    "onset": _fraction_text(event.onset),
-                    "duration": _fraction_text(event.duration),
-                    "kind": event.kind,
-                    "pitches": pitch_tokens,
-                    "written_pitches": written_pitches,
-                    "ties": tie_states,
-                    "lyrics": lyric_values,
-                    "grace": event.grace,
-                },
-                ensure_ascii=False,
-                separators=(",", ":"),
-            ))
+            lines.append(
+                json.dumps(
+                    {
+                        "type": "event",
+                        "part": event.part_id,
+                        "measure": measure_numbers.get(
+                            event.measure_index, str(event.measure_index)
+                        ),
+                        "staff": event.staff_number,
+                        "voice": event.voice_id,
+                        "onset": _fraction_text(event.onset),
+                        "duration": _fraction_text(event.duration),
+                        "kind": event.kind,
+                        "pitches": pitch_tokens,
+                        "written_pitches": written_pitches,
+                        "ties": tie_states,
+                        "lyrics": lyric_values,
+                        "grace": event.grace,
+                    },
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                )
+            )
     return "\n".join(lines)
 
 
-def jianpu_text_to_midi(jianpu: str, midi_path: str | Path,
-                        options: ConvertOptions | None = None) -> Path:
+def jianpu_text_to_midi(
+    jianpu: str, midi_path: str | Path, options: ConvertOptions | None = None
+) -> Path:
     """Minimal jianpu-text -> MIDI converter.
 
     Accepted jianpu tokens:
@@ -427,8 +418,9 @@ def jianpu_text_to_midi(jianpu: str, midi_path: str | Path,
     return midi_path
 
 
-def jianpu_text_to_musicxml(jianpu: str, xml_path: str | Path,
-                            options: ConvertOptions | None = None) -> Path:
+def jianpu_text_to_musicxml(
+    jianpu: str, xml_path: str | Path, options: ConvertOptions | None = None
+) -> Path:
     """jianpu text -> MusicXML: jianpu -> MIDI -> MusicXML."""
     options = options or ConvertOptions()
     tmp_midi = Path(xml_path).with_suffix(".tmp.mid")
@@ -458,7 +450,6 @@ def _pitch_to_jianpu(p: music21.pitch.Pitch) -> str:
     accidental = ""
     if degree in (1, 3, 6, 8, 10):  # black key
         # In jianpu, a sharp on a white-key slot is written as 1#/2#/4#/5#/6#.
-        white_key_offset = {1: 0, 3: 1, 6: 3, 8: 4, 10: 5}
         base_semitone = semitone - 1
         accidental = "#"
         if semitone % 12 == 1:  # C#/Db -> prefer the Db spelling

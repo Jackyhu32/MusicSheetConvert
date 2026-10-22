@@ -7,23 +7,25 @@ Supported renderers:
 The output format is inferred from the file extension: ``.png`` / ``.pdf`` /
 ``.svg`` / ``.musicxml`` / ``.mid``.
 """
+
 from __future__ import annotations
 
 import os
 import shutil
 import subprocess
 from pathlib import Path
-from typing import Optional, Union
 
 import music21
 
-PathLike = Union[str, Path]
+from src.music_convert.model import ScoreModel
+
+PathLike = str | Path
 
 # Default MuseScore 4 install location (this machine).
 _MSCORE_DEFAULT_WIN = r"D:\Program Files (x86)\MuseScore 4\bin\MuseScore4.exe"
 
 
-def find_musescore(custom_path: Optional[str] = None) -> Optional[str]:
+def find_musescore(custom_path: str | None = None) -> str | None:
     """Locate the MuseScore executable. Returns an absolute path or ``None``."""
     if custom_path and Path(custom_path).exists():
         return custom_path
@@ -32,7 +34,14 @@ def find_musescore(custom_path: Optional[str] = None) -> Optional[str]:
     if env and Path(env).exists():
         return env
     # 2) Search PATH for known names.
-    for name in ("MuseScore4", "MuseScore4.exe", "musescore", "musescore.exe", "mscore", "mscore.exe"):
+    for name in (
+        "MuseScore4",
+        "MuseScore4.exe",
+        "musescore",
+        "musescore.exe",
+        "mscore",
+        "mscore.exe",
+    ):
         found = shutil.which(name)
         if found:
             return found
@@ -42,13 +51,36 @@ def find_musescore(custom_path: Optional[str] = None) -> Optional[str]:
     return None
 
 
-def musicxml_to_jianpu_text_file(xml_path: PathLike, out_path: PathLike) -> Path:
-    """MusicXML -> jianpu text file (.txt)."""
-    from src.music_convert.core import musicxml_to_jianpu_text
-    xml_path = Path(xml_path)
+def musicxml_to_jianpu_text_file(
+    xml_path: PathLike,
+    out_path: PathLike,
+    *,
+    mode: str = "movable",
+    tonic: str | None = None,
+) -> Path:
+    """MusicXML -> auditable Jianpu JSONL text file."""
+    from src.music_convert.musicxml_io import load_musicxml
+
+    return score_model_to_jianpu_text_file(
+        load_musicxml(xml_path), out_path, mode=mode, tonic=tonic
+    )
+
+
+def score_model_to_jianpu_text_file(
+    score: ScoreModel,
+    out_path: PathLike,
+    *,
+    mode: str = "movable",
+    tonic: str | None = None,
+) -> Path:
+    """Write auditable Jianpu JSONL directly from a parsed score model."""
+    from src.music_convert.core import score_model_to_jianpu_text
+
     out_path = Path(out_path)
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    out_path.write_text(musicxml_to_jianpu_text(xml_path), encoding="utf-8")
+    out_path.write_text(
+        score_model_to_jianpu_text(score, mode=mode, tonic=tonic), encoding="utf-8"
+    )
     return out_path
 
 
@@ -56,8 +88,8 @@ def render_via_musescore(
     source: PathLike,
     out_path: PathLike,
     *,
-    mscore_exe: Optional[str] = None,
-    extra_args: Optional[list[str]] = None,
+    mscore_exe: str | None = None,
+    extra_args: list[str] | None = None,
 ) -> Path:
     """Convert ``source`` to ``out_path`` via MuseScore (format determined by extension).
 
@@ -79,11 +111,13 @@ def render_via_musescore(
         cmd.extend(extra_args)
     cmd.append(str(source))
     try:
-        proc = subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=120)
+        subprocess.run(cmd, check=True, capture_output=True, text=True, timeout=120)
     except FileNotFoundError as e:
         raise RuntimeError(f"MuseScore binary not found: {bin_name}") from e
     except subprocess.CalledProcessError as e:
-        raise RuntimeError(f"MuseScore conversion failed: {e.stderr or e.stdout}") from e
+        raise RuntimeError(
+            f"MuseScore conversion failed: {e.stderr or e.stdout}"
+        ) from e
     except subprocess.TimeoutExpired as e:
         raise RuntimeError("MuseScore conversion timed out") from e
 
@@ -92,8 +126,8 @@ def render_via_musescore(
     # Try a handful of candidate locations before declaring failure.
     if out_path.suffix.lower() in (".png", ".pdf", ".svg"):
         candidates = [
-            out_path,                                                          # the expected location
-            out_path.parent / f"{source.stem}-1{out_path.suffix}",              # legacy v3 naming
+            out_path,  # the expected location
+            out_path.parent / f"{source.stem}-1{out_path.suffix}",  # legacy v3 naming
             out_path.with_name(f"{source.stem}-1{out_path.suffix}"),
             out_path.with_name(f"{source.stem}{out_path.suffix}"),
         ]
@@ -114,20 +148,23 @@ def render_via_musescore(
     return out_path
 
 
-def musicxml_to_png(xml_path: PathLike, out_path: PathLike,
-                    mscore_exe: Optional[str] = None) -> Path:
+def musicxml_to_png(
+    xml_path: PathLike, out_path: PathLike, mscore_exe: str | None = None
+) -> Path:
     """MusicXML -> PNG."""
     return render_via_musescore(xml_path, out_path, mscore_exe=mscore_exe)
 
 
-def musicxml_to_pdf(xml_path: PathLike, out_path: PathLike,
-                    mscore_exe: Optional[str] = None) -> Path:
+def musicxml_to_pdf(
+    xml_path: PathLike, out_path: PathLike, mscore_exe: str | None = None
+) -> Path:
     """MusicXML -> PDF."""
     return render_via_musescore(xml_path, out_path, mscore_exe=mscore_exe)
 
 
-def midi_to_musicxml(midi_path: PathLike, out_path: PathLike,
-                     mscore_exe: Optional[str] = None) -> Path:
+def midi_to_musicxml(
+    midi_path: PathLike, out_path: PathLike, mscore_exe: str | None = None
+) -> Path:
     """MIDI -> MusicXML via MuseScore. Generally more accurate than music21's built-in converter."""
     return render_via_musescore(midi_path, out_path, mscore_exe=mscore_exe)
 

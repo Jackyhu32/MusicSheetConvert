@@ -1,4 +1,5 @@
 """End-to-end test: invoke the main pipeline via the CLI (MusicXML input, OCR skipped)."""
+
 from __future__ import annotations
 
 import sys
@@ -35,18 +36,21 @@ def main() -> int:
         out = td_p / "out"
 
         from src.main import run_pipeline
+
         results = run_pipeline(
             input_path=xml,
             out_dir=out,
             bpm=120,
             render_png=False,
             skip_ocr=True,
+            mode="fixed",
         )
         for r in results:
             print("===", r)
             assert r.musicxml and r.musicxml.exists()
             assert r.midi and r.midi.exists() and r.midi.stat().st_size > 0
             assert r.jianpu_txt and r.jianpu_txt.exists()
+            assert r.jianpu_pdf and r.jianpu_pdf.exists()
             print(r.jianpu_txt.read_text(encoding="utf-8"))
     print("E2E OK")
     return 0

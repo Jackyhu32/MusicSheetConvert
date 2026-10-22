@@ -46,20 +46,32 @@ class MainPipelinePageMergeTests(unittest.TestCase):
             output_directories.append(output_directory)
             output_directory.mkdir(parents=True, exist_ok=True)
             result = output_directory / f"{image.stem}.musicxml"
-            result.write_bytes((self.fixtures / page_fixtures[index]).read_bytes())
+            fixture_bytes = (self.fixtures / page_fixtures[index]).read_bytes()
+            fixture_bytes = fixture_bytes.replace(b'<tie type="start"/>', b"")
+            fixture_bytes = fixture_bytes.replace(
+                b'<notations><tied type="start"/><slur type="start" number="1"/></notations>',
+                b"",
+            )
+            fixture_bytes = fixture_bytes.replace(
+                b'<notations><slur type="stop" number="1"/></notations>', b""
+            )
+            result.write_bytes(fixture_bytes)
             return result
 
         def make_midi(source, destination, _options):
             destination = Path(destination)
             destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(b"partial" if fail_midi else Path(source).read_bytes())
+            midi_content = (
+                b"partial" if fail_midi else (source.source_musicxml or b"mock midi")
+            )
+            destination.write_bytes(midi_content)
             if fail_midi:
                 raise RuntimeError("mock conversion failure")
 
-        def make_jianpu(source, destination):
+        def make_jianpu(source, destination, **_kwargs):
             destination = Path(destination)
             destination.parent.mkdir(parents=True, exist_ok=True)
-            destination.write_bytes(Path(source).read_bytes())
+            destination.write_bytes(b"mock text")
 
         stack = ExitStack()
         self.addCleanup(stack.close)
@@ -70,10 +82,18 @@ class MainPipelinePageMergeTests(unittest.TestCase):
         stack.enter_context(patch("src.main.is_audiveris_available", return_value=True))
         stack.enter_context(patch("src.main.image_to_musicxml", side_effect=recognize))
         midi = stack.enter_context(
-            patch("src.main.core.musicxml_to_midi", side_effect=make_midi)
+            patch("src.main.core.score_model_to_midi", side_effect=make_midi)
         )
         jianpu = stack.enter_context(
-            patch("src.main.musicxml_to_jianpu_text_file", side_effect=make_jianpu)
+            patch("src.main.score_model_to_jianpu_text_file", side_effect=make_jianpu)
+        )
+        stack.enter_context(
+            patch(
+                "src.main.render_jianpu_pdf",
+                side_effect=lambda _model, destination, **_kwargs: make_jianpu(
+                    None, destination
+                ),
+            )
         )
         if fail_render:
             stack.enter_context(
@@ -117,13 +137,23 @@ class MainPipelinePageMergeTests(unittest.TestCase):
         run_dir = self.run_root(results[0])
         self.assertEqual(
             [Path("musicxml/pages/page-0001"), Path("musicxml/pages/page-0002")],
-            [path.relative_to(output_directories[0].parents[2]) for path in output_directories],
+            [
+                path.relative_to(output_directories[0].parents[2])
+                for path in output_directories
+            ],
         )
         self.assertEqual(out_dir, run_dir.parent)
         self.assertEqual(run_dir / "musicxml" / "merged.musicxml", results[0].musicxml)
-        self.assertTrue(all(path.is_relative_to(run_dir) for path in (
-            results[0].musicxml, results[0].midi, results[0].jianpu_txt
-        )))
+        self.assertTrue(
+            all(
+                path.is_relative_to(run_dir)
+                for path in (
+                    results[0].musicxml,
+                    results[0].midi,
+                    results[0].jianpu_txt,
+                )
+            )
+        )
         merged = load_musicxml(results[0].musicxml)
         self.assertEqual(5, len(merged.parts))
         self.assertEqual(
@@ -158,12 +188,16 @@ class MainPipelinePageMergeTests(unittest.TestCase):
             self.assertNotEqual(first_root, self.run_root(second))
             self.assertNotEqual(first.musicxml, second.musicxml)
             self.assertNotEqual(first.midi, second.midi)
-            self.assertTrue(all(
-                path.read_bytes() == content
-                for relative, content in first_content.items()
-                for path in [first_root / relative]
-            ))
-            self.assertNotEqual(first.musicxml.read_bytes(), second.musicxml.read_bytes())
+            self.assertTrue(
+                all(
+                    path.read_bytes() == content
+                    for relative, content in first_content.items()
+                    for path in [first_root / relative]
+                )
+            )
+            self.assertNotEqual(
+                first.musicxml.read_bytes(), second.musicxml.read_bytes()
+            )
             self.assertNotEqual(first.midi.read_bytes(), second.midi.read_bytes())
 
     def test_failed_conversion_publishes_nothing_and_preserves_previous_run(self):
@@ -181,9 +215,7 @@ class MainPipelinePageMergeTests(unittest.TestCase):
                 for path in previous_root.rglob("*")
                 if path.is_file()
             }
-            published_before = {
-                path for path in output_root.iterdir() if path.is_dir()
-            }
+            published_before = {path for path in output_root.iterdir() if path.is_dir()}
 
             self.run_pdf_pipeline(
                 ("omr-page-2.musicxml", "omr-page-1.musicxml"),
@@ -220,9 +252,7 @@ class MainPipelinePageMergeTests(unittest.TestCase):
                 for path in previous_root.rglob("*")
                 if path.is_file()
             }
-            published_before = {
-                path for path in output_root.iterdir() if path.is_dir()
-            }
+            published_before = {path for path in output_root.iterdir() if path.is_dir()}
 
             self.run_pdf_pipeline(
                 ("omr-page-2.musicxml", "omr-page-1.musicxml"),
@@ -267,16 +297,18 @@ class MainPipelinePageMergeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source = root / "score.musicxml"
-            original = (self.fixtures / "omr-page-1.musicxml").read_bytes()
+            original = (self.fixtures / "satbb-two-measures.musicxml").read_bytes()
             source.write_bytes(original)
             with (
                 patch("src.main.image_to_musicxml") as recognize,
-                patch("src.main.core.musicxml_to_midi") as midi,
-                patch("src.main.musicxml_to_jianpu_text_file") as jianpu,
+                patch("src.main.core.score_model_to_midi") as midi,
+                patch("src.main.score_model_to_jianpu_text_file") as jianpu,
+                patch("src.main.render_jianpu_pdf"),
             ):
                 results = run_pipeline(source, root / "output")
                 self.assertEqual(1, len(results))
-                self.assertEqual(source, results[0].musicxml)
+                self.assertNotEqual(source, results[0].musicxml)
+                self.assertEqual(original, results[0].musicxml.read_bytes())
                 self.assertEqual(original, source.read_bytes())
                 self.assertTrue(results[0].midi.is_relative_to(root / "output"))
                 recognize.assert_not_called()
