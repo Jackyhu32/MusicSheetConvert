@@ -143,34 +143,44 @@ class ScoreValidationTests(unittest.TestCase):
         self.assertEqual([], validate_score(score))
 
     def test_grace_note_beyond_measure_endpoint_reports_overflow(self):
+        source = SourceLocation(page=3, system=2, measure_number="1")
         score = model(
             [
+                event(0, 0, 4, "rest"),
                 event(
                     0,
                     5,
                     0,
                     pitches=(Pitch("D", 0, 4),),
                     sounding_pitches=(Pitch("D", 0, 4),),
+                    location=source,
                     grace=True,
                 )
             ]
         )
-        self.assertIn("measure_overflow", self.codes(score))
+        issues = validate_score(score)
+        self.assertEqual(["measure_overflow"], [issue.code for issue in issues])
+        self.assertEqual([source], [issue.location for issue in issues])
 
     def test_grace_note_before_measure_start_reports_negative_onset(self):
+        source = SourceLocation(page=4, system=1, measure_number="1")
         score = model(
             [
+                event(0, 0, 4, "rest"),
                 event(
                     0,
                     -1,
                     0,
                     pitches=(Pitch("D", 0, 4),),
                     sounding_pitches=(Pitch("D", 0, 4),),
+                    location=source,
                     grace=True,
                 )
             ]
         )
-        self.assertIn("measure_negative_onset", self.codes(score))
+        issues = validate_score(score)
+        self.assertEqual(["measure_negative_onset"], [issue.code for issue in issues])
+        self.assertEqual([source], [issue.location for issue in issues])
 
     def test_zero_duration_non_grace_note_is_invalid(self):
         score = model(
