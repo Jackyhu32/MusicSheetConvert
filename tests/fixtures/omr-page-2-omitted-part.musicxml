@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0">
+  <work><work-title>OMR Page Merge</work-title></work>
+  <part-list>
+    <score-part id="P-S"><part-name>Soprano</part-name></score-part>
+    <score-part id="P-A"><part-name>Alto</part-name></score-part>
+    <score-part id="P-T"><part-name>Tenor</part-name></score-part>
+    <score-part id="P-BR"><part-name>Baritone</part-name></score-part>
+  </part-list>
+  <part id="P-S"><measure number="8"><attributes><divisions>1</divisions></attributes><note><pitch><step>C</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice></note></measure></part>
+  <part id="P-A"><measure number="8"><attributes><divisions>1</divisions></attributes><note><pitch><step>E</step><octave>4</octave></pitch><duration>4</duration><voice>1</voice><lyric number="1"><syllabic>single</syllabic><text>page-two</text></lyric></note></measure></part>
+  <part id="P-T"><measure number="8"><attributes><divisions>1</divisions></attributes><note><pitch><step>G</step><octave>3</octave></pitch><duration>4</duration><voice>1</voice></note></measure></part>
+  <part id="P-BR"><measure number="8"><attributes><divisions>1</divisions></attributes><note><pitch><step>B</step><octave>3</octave></pitch><duration>4</duration><voice>1</voice></note></measure></part>
+</score-partwise>

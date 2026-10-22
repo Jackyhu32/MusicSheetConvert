@@ -2,8 +2,12 @@
 
 from __future__ import annotations
 
+import tempfile
+import unicodedata
 import xml.etree.ElementTree as ET
 import zipfile
+from copy import deepcopy
+from dataclasses import replace
 from fractions import Fraction
 from io import BytesIO
 from pathlib import Path
@@ -19,6 +23,7 @@ from music21 import (
     key,
     meter,
     note,
+    spanner,
     stream,
     tempo,
 )
@@ -28,6 +33,7 @@ from .model import (
     Lyric,
     MeasureContext,
     Pitch,
+    ReviewIssue,
     ScoreDirection,
     ScoreEvent,
     ScoreModel,
@@ -716,3 +722,341 @@ def load_musicxml(path: str | Path) -> ScoreModel:
     source_bytes = source_path.read_bytes()
     score = converter.parse(str(source_path))
     return score_to_model(score, source_musicxml=source_bytes)
+
+
+
+def _normalized_part_name(name: str) -> str:
+    return " ".join(unicodedata.normalize("NFKC", name).split()).casefold()
+
+
+def _page_music21_score(page: ScoreModel) -> stream.Score:
+    """Parse one page's retained source, failing closed on ambiguous structure."""
+    source = page.source_musicxml
+    if not source:
+        raise ValueError("every page must retain its source MusicXML")
+    root = _xml_root(source)
+    details = _source_details(source)
+    if root is None or _local_name(root) != "score-partwise" or details is None:
+        raise ValueError("page source must be valid partwise MusicXML")
+
+    source_parts = details["part_info"]
+    model_names = [_normalized_part_name(part.name) for part in page.parts]
+    source_names = [_normalized_part_name(name) for _, name in source_parts]
+    source_ids = [part_id for part_id, _ in source_parts]
+    if (
+        not model_names
+        or any(not name for name in model_names)
+        or len(set(model_names)) != len(model_names)
+        or len(set(source_ids)) != len(source_ids)
+        or model_names != source_names
+        or [part.id for part in page.parts] != source_ids
+    ):
+        raise ValueError("page part identity does not match its MusicXML source")
+
+    suffix = ".mxl" if zipfile.is_zipfile(BytesIO(source)) else ".musicxml"
+    try:
+        with tempfile.TemporaryDirectory(prefix="musicxml-page-") as directory:
+            source_path = Path(directory) / f"page{suffix}"
+            source_path.write_bytes(source)
+            score = converter.parse(str(source_path))
+    except Exception as error:
+        raise ValueError("page source MusicXML could not be parsed") from error
+
+    if len(score.parts) != len(page.parts):
+        raise ValueError("page MusicXML part structure is ambiguous")
+    part_measure_counts = [
+        len(part.getElementsByClass(stream.Measure)) for part in score.parts
+    ]
+    if (
+        not part_measure_counts
+        or len(set(part_measure_counts)) != 1
+        or part_measure_counts[0] != len(page.measures)
+        or not page.measures
+    ):
+        raise ValueError("page parts do not have the same complete measure structure")
+    for part_model in page.parts:
+        if any(
+            event.part_id != part_model.id
+            or event.measure_index < 0
+            or event.measure_index >= len(page.measures)
+            for event in part_model.events
+        ):
+            raise ValueError("page event structure does not match its part")
+    return score
+
+
+def _boundary_tie_marks(
+    part: ScorePart, measure_index: int, measure_duration: Fraction, outgoing: bool
+) -> list[tuple[tuple[str, str, Pitch], ScoreEvent]]:
+    marks: list[tuple[tuple[str, str, Pitch], ScoreEvent]] = []
+    for event in part.events:
+        if event.measure_index != measure_index:
+            continue
+        if outgoing:
+            if event.onset + event.duration != measure_duration:
+                continue
+            tie_types = {"start", "continue"}
+        else:
+            if event.onset != 0:
+                continue
+            tie_types = {"stop", "continue"}
+        for pitch, tie_type in zip(event.pitches, event.pitch_ties):
+            if tie_type in tie_types:
+                marks.append(((event.voice_id, event.staff_number, pitch), event))
+    return marks
+
+
+def merge_page_models(page_models: list[ScoreModel]) -> ScoreModel:
+    """Merge ordered page models after validating part identity and source structure."""
+    if not page_models:
+        raise ValueError("at least one page model is required")
+
+    scores = [_page_music21_score(page) for page in page_models]
+    first_names = [_normalized_part_name(part.name) for part in page_models[0].parts]
+    if len(set(first_names)) != len(first_names):
+        raise ValueError("part names must be unique within each page")
+    for page in page_models[1:]:
+        names = [_normalized_part_name(part.name) for part in page.parts]
+        if len(set(names)) != len(names) or names != first_names:
+            raise ValueError("page part names must be unique and in the same order")
+        for first_part, other_part in zip(page_models[0].parts, page.parts):
+            if first_part.transpose_semitones != other_part.transpose_semitones:
+                raise ValueError("part transposition differs between pages")
+
+    page_offsets: list[int] = []
+    total_measures = 0
+    for page in page_models:
+        page_offsets.append(total_measures)
+        total_measures += len(page.measures)
+
+    active_fifths: int | None = None
+    active_mode: str | None = None
+    active_beats: int | None = None
+    active_beat_type: int | None = None
+    measures: list[MeasureContext] = []
+    parts = [
+        ScorePart(
+            id=part.id,
+            name=part.name,
+            transpose_semitones=part.transpose_semitones,
+            staves=deepcopy(part.staves),
+        )
+        for part in page_models[0].parts
+    ]
+    directions: list[ScoreDirection] = []
+    review_issues: list[ReviewIssue] = []
+    tempo_bpm = next(
+        (page.tempo_bpm for page in page_models if page.tempo_bpm is not None), None
+    )
+    requires_review = any(page.requires_review for page in page_models)
+
+    for page_index, page in enumerate(page_models):
+        offset = page_offsets[page_index]
+        for local_index, measure in enumerate(page.measures):
+            if measure.fifths is not None:
+                active_fifths = measure.fifths
+            if measure.mode is not None:
+                active_mode = measure.mode
+            if measure.beats is not None:
+                active_beats = measure.beats
+            if measure.beat_type is not None:
+                active_beat_type = measure.beat_type
+            measures.append(
+                replace(
+                    measure,
+                    index=offset + local_index,
+                    number=str(offset + local_index + 1),
+                    fifths=active_fifths,
+                    mode=active_mode,
+                    beats=active_beats,
+                    beat_type=active_beat_type,
+                )
+            )
+
+        canonical_ids = {
+            part.id: parts[index].id for index, part in enumerate(page.parts)
+        }
+        for part_index, page_part in enumerate(page.parts):
+            output_part = parts[part_index]
+            for event in page_part.events:
+                old_location = event.source_location
+                local_measure_number = page.measures[event.measure_index].number
+                location = SourceLocation(
+                    page=page_index + 1,
+                    system=old_location.system if old_location else None,
+                    measure_number=(
+                        old_location.measure_number
+                        if old_location and old_location.measure_number is not None
+                        else local_measure_number
+                    ),
+                )
+                output_part.events.append(
+                    replace(
+                        event,
+                        part_id=output_part.id,
+                        measure_index=offset + event.measure_index,
+                        source_location=location,
+                    )
+                )
+
+        for direction in page.directions:
+            if direction.measure_index < 0 or direction.measure_index >= len(page.measures):
+                raise ValueError("page direction is outside its measure structure")
+            if direction.part_id is not None and direction.part_id not in canonical_ids:
+                raise ValueError("page direction references an unknown part")
+            directions.append(
+                replace(
+                    direction,
+                    measure_index=offset + direction.measure_index,
+                    part_id=(
+                        canonical_ids[direction.part_id]
+                        if direction.part_id is not None
+                        else None
+                    ),
+                )
+            )
+
+        for issue in page.review_issues:
+            location = issue.location
+            if location is not None:
+                local_number = location.measure_number
+                if local_number is None and page.measures:
+                    local_number = page.measures[0].number
+                location = replace(location, page=page_index + 1, measure_number=local_number)
+            review_issues.append(replace(issue, location=location))
+
+    for page_index in range(len(page_models) - 1):
+        left, right = page_models[page_index : page_index + 2]
+        left_measure = len(left.measures) - 1
+        right_measure = 0
+        for part_index, left_part in enumerate(left.parts):
+            right_part = right.parts[part_index]
+            outgoing = _boundary_tie_marks(
+                left_part, left_measure, left.measures[left_measure].duration, True
+            )
+            incoming = _boundary_tie_marks(
+                right_part, right_measure, right.measures[right_measure].duration, False
+            )
+            remaining_incoming = list(incoming)
+            for mark, event in outgoing:
+                match = next(
+                    (index for index, (other_mark, _) in enumerate(remaining_incoming)
+                     if other_mark == mark),
+                    None,
+                )
+                if match is not None:
+                    remaining_incoming.pop(match)
+                    continue
+                location = SourceLocation(
+                    page=page_index + 1,
+                    system=(event.source_location.system if event.source_location else None),
+                    measure_number=(
+                        event.source_location.measure_number
+                        if event.source_location
+                        else left.measures[left_measure].number
+                    ),
+                )
+                review_issues.append(
+                    ReviewIssue(
+                        "page_boundary_tie_unresolved",
+                        f"Tie at the end of page {page_index + 1} has no matching start on page {page_index + 2}.",
+                        location,
+                        candidates=(f"page {page_index + 2}",),
+                    )
+                )
+                requires_review = True
+            for _mark, event in remaining_incoming:
+                location = SourceLocation(
+                    page=page_index + 2,
+                    system=(event.source_location.system if event.source_location else None),
+                    measure_number=(
+                        event.source_location.measure_number
+                        if event.source_location
+                        else right.measures[0].number
+                    ),
+                )
+                review_issues.append(
+                    ReviewIssue(
+                        "page_boundary_tie_unresolved",
+                        f"Tie at the start of page {page_index + 2} has no matching stop on page {page_index + 1}.",
+                        location,
+                        candidates=(f"page {page_index + 1}",),
+                    )
+                )
+                requires_review = True
+
+    merged_score = stream.Score()
+    merged_score.metadata = deepcopy(getattr(scores[0], "metadata", None))
+    if merged_score.metadata is not None and page_models[0].title:
+        merged_score.metadata.title = page_models[0].title
+    for part_index, first_music_part in enumerate(scores[0].parts):
+        combined_part = deepcopy(first_music_part)
+        for original_measure in list(
+            combined_part.getElementsByClass(stream.Measure)
+        ):
+            combined_part.remove(original_measure)
+        for page_index, score in enumerate(scores):
+            source_measures = list(
+                score.parts[part_index].getElementsByClass(stream.Measure)
+            )
+            for local_index, source_measure in enumerate(source_measures):
+                measure = deepcopy(source_measure)
+                measure.number = page_offsets[page_index] + local_index + 1
+                combined_part.append(measure)
+        merged_score.insert(0, combined_part)
+
+    for part_index, model_part in enumerate(parts):
+        music_part = merged_score.parts[part_index]
+        open_slurs: dict[str, Any] = {}
+        used_elements: set[int] = set()
+        for event in sorted(
+            model_part.events,
+            key=lambda item: (item.measure_index, item.onset, item.voice_id),
+        ):
+            if not event.slurs:
+                continue
+            measure = list(music_part.getElementsByClass(stream.Measure))[event.measure_index]
+            element = next(
+                (
+                    candidate
+                    for candidate in measure.recurse().notes
+                    if id(candidate) not in used_elements
+                    and _fraction(candidate.getOffsetInHierarchy(measure)) == event.onset
+                    and tuple(
+                        _pitch_from_music21(pitch)
+                        for pitch in getattr(candidate, "pitches", ())
+                    ) == event.pitches
+                    and (
+                        (event.kind == "note" and isinstance(candidate, note.Note))
+                        or (event.kind == "chord" and isinstance(candidate, chord.Chord))
+                    )
+                ),
+                None,
+            )
+            if element is None:
+                raise ValueError("slur event cannot be matched to the MusicXML source")
+            used_elements.add(id(element))
+            for slur_type, number in event.slurs:
+                if slur_type == "start":
+                    open_slurs[number] = element
+                elif slur_type == "stop" and number in open_slurs:
+                    merged_score.insert(0, spanner.Slur(open_slurs.pop(number), element))
+                elif slur_type == "continue" and number in open_slurs:
+                    merged_score.insert(0, spanner.Slur(open_slurs[number], element))
+                    open_slurs[number] = element
+
+    with tempfile.TemporaryDirectory(prefix="musicxml-merged-") as directory:
+        output_path = Path(directory) / "merged.musicxml"
+        merged_score.write("musicxml", fp=str(output_path))
+        source_musicxml = output_path.read_bytes()
+
+    return ScoreModel(
+        title=page_models[0].title,
+        parts=parts,
+        measures=measures,
+        tempo_bpm=tempo_bpm,
+        directions=directions,
+        source_musicxml=source_musicxml,
+        requires_review=requires_review,
+        review_issues=review_issues,
+    )

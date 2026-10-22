@@ -16,9 +16,8 @@ import shutil
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Union
 
-PathLike = Union[str, Path]
+PathLike = str | Path
 
 
 # Default Windows install path (this machine).
@@ -62,8 +61,7 @@ def image_to_musicxml(image_path: PathLike, out_dir: PathLike,
     """Invoke Audiveris to transcribe a sheet image into MusicXML.
 
     Returns:
-        Path to the generated ``.mxl`` (compressed MusicXML). If multiple
-        matching files exist, the first (lexicographically) is returned.
+        Path to the exact generated page output (``.mxl``, ``.musicxml``, or ``.xml``).
     """
     cfg = cfg or AudiverisConfig()
     image_path = Path(image_path)
@@ -82,9 +80,18 @@ def image_to_musicxml(image_path: PathLike, out_dir: PathLike,
     if cfg.extra_args:
         cmd.extend(cfg.extra_args)
     cmd.append(str(image_path))
+    expected_paths = [
+        out_dir / f"{image_path.stem}{suffix}"
+        for suffix in (".mxl", ".musicxml", ".xml")
+    ]
+    # Never mistake an output from an earlier run for this transcription.
+    for expected_path in expected_paths:
+        if expected_path.is_file():
+            expected_path.unlink()
+
     try:
-        proc = subprocess.run(cmd, check=True, capture_output=True, text=True,
-                              timeout=cfg.timeout)
+        subprocess.run(cmd, check=True, capture_output=True, text=True,
+                       timeout=cfg.timeout)
     except FileNotFoundError as e:
         raise RuntimeError(f"Audiveris binary not found: {bin_name}") from e
     except subprocess.CalledProcessError as e:
@@ -98,22 +105,11 @@ def image_to_musicxml(image_path: PathLike, out_dir: PathLike,
             "or you may need to raise the timeout."
         ) from e
 
-    # Prefer .mxl, then .musicxml, then .xml.
-    candidates = sorted(out_dir.glob(f"{image_path.stem}*.mxl"))
-    if not candidates:
-        candidates = sorted(out_dir.glob(f"{image_path.stem}*.musicxml"))
-    if not candidates:
-        candidates = sorted(out_dir.glob(f"{image_path.stem}*.xml"))
-    if not candidates:
-        # Fallback: any MusicXML file in the output dir.
-        all_xml = (sorted(out_dir.glob("*.mxl"))
-                   + sorted(out_dir.glob("*.musicxml"))
-                   + sorted(out_dir.glob("*.xml")))
-        if all_xml:
-            return all_xml[0]
-        files = [p.name for p in out_dir.iterdir() if p.is_file()]
-        raise FileNotFoundError(
-            f"Audiveris ran successfully but no MusicXML was found in {out_dir}. "
-            f"Files present: {files}"
-        )
-    return candidates[0]
+    for expected_path in expected_paths:
+        if expected_path.is_file():
+            return expected_path
+    files = [p.name for p in out_dir.iterdir() if p.is_file()]
+    raise FileNotFoundError(
+        f"Audiveris ran successfully but did not create the expected MusicXML "
+        f"for {image_path.name} in {out_dir}. Files present: {files}"
+    )
