@@ -68,7 +68,9 @@ def _validate_timeline(
                 continue
 
             cursor = Fraction(0)
-            ordered_events = sorted(events, key=lambda value: (value.onset, value.duration))
+            ordered_events = sorted(
+                events, key=lambda value: (value.onset, value.duration)
+            )
             for item in ordered_events:
                 if item.grace and item.duration == 0:
                     if item.onset < 0:
@@ -151,9 +153,13 @@ def _validate_pitch_data(
     model: ScoreModel,
     measure_by_index: dict[int, object],
     measure_starts: dict[int, Fraction],
-) -> tuple[list[ValidationIssue], dict[tuple[str, str, str], list[tuple[Fraction, ScoreEvent]]]]:
+) -> tuple[
+    list[ValidationIssue], dict[tuple[str, str, str], list[tuple[Fraction, ScoreEvent]]]
+]:
     issues: list[ValidationIssue] = []
-    tie_streams: dict[tuple[str, str, str], list[tuple[Fraction, ScoreEvent]]] = defaultdict(list)
+    tie_streams: dict[tuple[str, str, str], list[tuple[Fraction, ScoreEvent]]] = (
+        defaultdict(list)
+    )
     for part in model.parts:
         for item in part.events:
             if item.kind == "rest":
@@ -245,7 +251,9 @@ def _validate_ties(
                         )
                         continue
                     if state != "none":
-                        transitions.append((_pitch_number(pitch), state, item.duration, item))
+                        transitions.append(
+                            (_pitch_number(pitch), state, item.duration, item)
+                        )
 
             used: set[int] = set()
             for pitch_number, entries in list(pending.items()):
@@ -253,7 +261,9 @@ def _validate_ties(
                     transition_index = next(
                         (
                             index
-                            for index, (target, state, _duration, _item) in enumerate(transitions)
+                            for index, (target, state, _duration, _item) in enumerate(
+                                transitions
+                            )
                             if index not in used
                             and target == pitch_number
                             and state in {"stop", "continue"}
@@ -271,8 +281,14 @@ def _validate_ties(
                             mismatched_stop = next(
                                 (
                                     index
-                                    for index, (_target, state, _duration, _item) in enumerate(transitions)
-                                    if index not in used and state in {"stop", "continue"}
+                                    for index, (
+                                        _target,
+                                        state,
+                                        _duration,
+                                        _item,
+                                    ) in enumerate(transitions)
+                                    if index not in used
+                                    and state in {"stop", "continue"}
                                 ),
                                 None,
                             )
@@ -298,7 +314,9 @@ def _validate_ties(
             for index, (pitch_number, state, duration, item) in enumerate(transitions):
                 if index in used:
                     if state == "continue":
-                        pending[pitch_number].append((onset + duration, item, "continue"))
+                        pending[pitch_number].append(
+                            (onset + duration, item, "continue")
+                        )
                     continue
                 measure_number = measure_by_index[item.measure_index].number
                 if state in {"stop", "continue"}:
@@ -328,6 +346,87 @@ def _validate_ties(
     return issues
 
 
+def _validate_slurs(
+    model: ScoreModel, measure_by_index: dict[int, object]
+) -> list[ValidationIssue]:
+    issues: list[ValidationIssue] = []
+    for part in model.parts:
+        streams: dict[tuple[str, str], list[ScoreEvent]] = defaultdict(list)
+        for item in part.events:
+            streams[(item.staff_number, item.voice_id)].append(item)
+
+        for (_staff_number, _voice_id), events in sorted(streams.items()):
+            events.sort(key=lambda item: (item.measure_index, item.onset))
+            open_slurs: dict[str, ScoreEvent] = {}
+            for item in events:
+                measure = measure_by_index.get(item.measure_index)
+                measure_number = measure.number if measure else str(item.measure_index)
+                for state, number in item.slurs:
+                    if state == "start":
+                        if number in open_slurs:
+                            issues.append(
+                                ValidationIssue(
+                                    "slur_duplicate_start",
+                                    part.id,
+                                    measure_number,
+                                    f"Slur {number!r} starts again before its preceding start is closed.",
+                                    item.source_location,
+                                )
+                            )
+                        else:
+                            open_slurs[number] = item
+                    elif state == "continue":
+                        if number not in open_slurs:
+                            issues.append(
+                                ValidationIssue(
+                                    "slur_orphan_continue",
+                                    part.id,
+                                    measure_number,
+                                    f"Slur {number!r} continues without an open start.",
+                                    item.source_location,
+                                )
+                            )
+                    elif state == "stop":
+                        if number not in open_slurs:
+                            issues.append(
+                                ValidationIssue(
+                                    "slur_orphan_stop",
+                                    part.id,
+                                    measure_number,
+                                    f"Slur {number!r} stops without an open start.",
+                                    item.source_location,
+                                )
+                            )
+                        else:
+                            del open_slurs[number]
+                    else:
+                        issues.append(
+                            ValidationIssue(
+                                "invalid_slur_state",
+                                part.id,
+                                measure_number,
+                                f"Unsupported slur state {state!r}.",
+                                item.source_location,
+                            )
+                        )
+
+            for number, start_item in sorted(open_slurs.items()):
+                measure = measure_by_index.get(start_item.measure_index)
+                measure_number = (
+                    measure.number if measure else str(start_item.measure_index)
+                )
+                issues.append(
+                    ValidationIssue(
+                        "slur_unmatched_start",
+                        part.id,
+                        measure_number,
+                        f"Slur {number!r} has no matching stop.",
+                        start_item.source_location,
+                    )
+                )
+    return issues
+
+
 def _validate_review_issues(model: ScoreModel) -> list[ValidationIssue]:
     issues = []
     for review in model.review_issues:
@@ -342,17 +441,24 @@ def _validate_review_issues(model: ScoreModel) -> list[ValidationIssue]:
             )
         )
     if model.requires_review and not model.review_issues:
-        issues.append(ValidationIssue("review_required", "", "", "Score is marked as requiring review."))
+        issues.append(
+            ValidationIssue(
+                "review_required", "", "", "Score is marked as requiring review."
+            )
+        )
     return issues
 
 
 def validate_score(model: ScoreModel) -> list[ValidationIssue]:
     """Return stable, source-located issues found in the score model."""
     measure_by_index, measure_starts = _measure_positions(model)
-    pitch_issues, tie_streams = _validate_pitch_data(model, measure_by_index, measure_starts)
+    pitch_issues, tie_streams = _validate_pitch_data(
+        model, measure_by_index, measure_starts
+    )
     return (
         _validate_timeline(model, measure_by_index)
         + pitch_issues
         + _validate_ties(tie_streams, measure_by_index)
+        + _validate_slurs(model, measure_by_index)
         + _validate_review_issues(model)
     )

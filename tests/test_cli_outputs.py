@@ -306,6 +306,95 @@ class CliOutputContractTests(unittest.TestCase):
                 [path.name for path in output.rglob("*") if path.is_file()],
             )
 
+    def test_direct_musicxml_with_unmatched_slur_fails_before_publication(self):
+        xml = b"""<?xml version="1.0" encoding="UTF-8"?>
+<score-partwise version="4.0"><part-list><score-part id="P1"><part-name>Voice</part-name></score-part></part-list>
+<part id="P1"><measure number="1"><attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+<note><pitch><step>C</step><octave>4</octave></pitch><duration>2</duration><type>half</type><notations><slur type="start" number="7"/></notations></note>
+<note><rest/><duration>2</duration><type>half</type></note></measure></part></score-partwise>"""
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "unmatched.musicxml"
+            source.write_bytes(xml)
+            output = root / "output"
+
+            with self.assertRaisesRegex(ValueError, "slur_unmatched_start"):
+                run_pipeline(source, output, mode="fixed")
+
+            self.assertEqual([], list(output.rglob("*.mid")))
+            self.assertEqual([], list(output.rglob("*.txt")))
+            self.assertEqual([], list(output.rglob("*.pdf")))
+            self.assertEqual([], list(output.rglob("*.musicxml")))
+
+    def test_omr_unmatched_slur_publishes_review_only_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "slur.pdf"
+            source.touch()
+            page_images = [root / "page-1.png", root / "page-2.png"]
+            for image in page_images:
+                image.touch()
+
+            def recognize(image, output_directory, _config):
+                page_index = page_images.index(image)
+                name = (
+                    "omr-page-1.musicxml" if page_index == 0 else "omr-page-2.musicxml"
+                )
+                content = (FIXTURES / name).read_bytes()
+                if page_index == 1:
+                    content = content.replace(
+                        b'<notations><slur type="stop" number="1"/></notations>', b""
+                    )
+                return _write_output(Path(output_directory) / name, content)
+
+            with (
+                patch("src.main.pdf_to_images", return_value=page_images),
+                patch(
+                    "src.main.preprocess_image", side_effect=lambda path, _dest: path
+                ),
+                patch("src.main.is_audiveris_available", return_value=True),
+                patch("src.main.image_to_musicxml", side_effect=recognize),
+                patch("src.main.core.score_model_to_midi") as midi,
+                patch("src.main.score_model_to_jianpu_text_file") as text,
+                patch("src.main.render_jianpu_pdf") as pdf,
+            ):
+                results = run_pipeline(source, root / "output")
+
+            self.assertEqual(1, len(results))
+            result = results[0]
+            self.assertEqual("review_only", result.publication_state)
+            self.assertTrue(result.requires_review)
+            self.assertTrue(result.review_report.is_file())
+            self.assertIsNone(result.musicxml)
+            self.assertIsNone(result.midi)
+            self.assertIsNone(result.jianpu_txt)
+            self.assertIsNone(result.jianpu_pdf)
+            midi.assert_not_called()
+            text.assert_not_called()
+            pdf.assert_not_called()
+            report = json.loads(result.review_report.read_text(encoding="utf-8"))
+            slur_issues = [
+                issue
+                for issue in report["validation_issues"]
+                if issue["code"] == "slur_unmatched_start"
+            ]
+            self.assertTrue(slur_issues)
+            self.assertTrue(
+                any(
+                    issue["location"]["page"] == 1
+                    and issue["location"]["measure_number"] == "8"
+                    for issue in slur_issues
+                )
+            )
+            self.assertEqual(
+                {"review.json"},
+                {
+                    path.name
+                    for path in result.review_report.parent.rglob("*")
+                    if path.is_file()
+                },
+            )
+
     def test_unresolved_omr_boundary_publishes_review_only_report(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
