@@ -953,6 +953,44 @@ class JianpuPdfTests(unittest.TestCase):
         self.assertIn("？「", extracted)
         self.assertNotIn("■", extracted)
 
+    def test_vertical_cjk_punctuation_only_lyrics_require_font(self):
+        for punctuation in ("︖", "︐", "︰"):
+            with self.subTest(punctuation=punctuation):
+                score = score_from_sequence(
+                    [
+                        [
+                            (
+                                Fraction(4),
+                                "note",
+                                (Pitch("C", 0, 4),),
+                                (),
+                                (Lyric(punctuation),),
+                            ),
+                        ]
+                    ]
+                )
+                with (
+                    patch.dict("os.environ", {"JIANPU_CJK_FONT": ""}),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
+                    output = Path(directory) / "vertical-punctuation.pdf"
+                    with self.assertRaisesRegex(RuntimeError, "CJK lyrics require"):
+                        render_jianpu_pdf(score, output, notation="fixed")
+                    self.assertFalse(output.exists())
+
+                    latin_font = Path("/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf")
+                    if latin_font.is_file():
+                        with self.assertRaisesRegex(
+                            RuntimeError, "missing required glyphs"
+                        ):
+                            render_jianpu_pdf(
+                                score,
+                                output,
+                                notation="fixed",
+                                font_path=latin_font,
+                            )
+                        self.assertFalse(output.exists())
+
     def test_latin_punctuation_only_lyrics_do_not_require_cjk_font(self):
         score = score_from_sequence(
             [

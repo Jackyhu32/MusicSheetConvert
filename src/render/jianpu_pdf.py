@@ -157,7 +157,7 @@ def _contains_cjk(text: str) -> bool:
         unicodedata.name(char, "").startswith(script_name_prefixes)
         or 0x3000 <= ord(char) <= 0x303F
         or (
-            0xFF00 <= ord(char) <= 0xFFEF
+            unicodedata.east_asian_width(char) in {"W", "F"}
             and unicodedata.category(char)[0] in {"P", "S"}
         )
         for char in text
