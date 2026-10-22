@@ -254,9 +254,6 @@ def _notation_contexts(model, tonic: str | None) -> dict[int, tuple[str, str]]:
                         raise ValueError("missing_tonic: unsupported key signature")
             else:
                 active_mode = measure_mode
-        elif active_mode is None and tonic is not None:
-            active_mode = "major"
-
         if tonic is not None:
             active_tonic = tonic
         if active_mode is None:

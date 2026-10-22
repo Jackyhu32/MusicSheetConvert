@@ -246,14 +246,11 @@ class ConversionCoreTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "missing_key_mode"):
                 core.musicxml_to_jianpu_text(path, mode="movable")
 
-    def test_explicit_tonic_overrides_missing_mode(self):
+    def test_explicit_tonic_does_not_override_missing_mode(self):
         with tempfile.TemporaryDirectory() as directory:
             path = self.write_xml(directory, "no-mode.musicxml", NO_EXPLICIT_MODE_XML)
-            events = [
-                row for row in rows(core.musicxml_to_jianpu_text(path, tonic="C"))
-                if row["type"] == "event"
-            ]
-        self.assertEqual("1", events[0]["pitches"])
+            with self.assertRaisesRegex(ValueError, "missing_key_mode"):
+                core.musicxml_to_jianpu_text(path, mode="movable", tonic="C")
 
     def test_invalid_timeline_is_rejected_before_midi_output_is_created(self):
         with tempfile.TemporaryDirectory() as directory:
