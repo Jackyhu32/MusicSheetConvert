@@ -122,6 +122,59 @@ def late_long_chord_score(pitch_count=80):
     return ScoreModel("Chord Bounds", [part], [measure])
 
 
+def chord_crossing_measure_boundary_score():
+    measures = [
+        MeasureContext(index, str(index + 1), Fraction(4), 0, "major", 4, 4)
+        for index in range(2)
+    ]
+    part = ScorePart("P1", "Overlap Part")
+    chord_pitches = (Pitch("C", 0, 4),) * 9
+    part.events = [
+        ScoreEvent("P1", 0, "1", Fraction(0), Fraction(3), "rest"),
+        ScoreEvent(
+            "P1",
+            0,
+            "1",
+            Fraction(3),
+            Fraction(1),
+            "chord",
+            pitches=chord_pitches,
+            sounding_pitches=chord_pitches,
+        ),
+        ScoreEvent(
+            "P1",
+            1,
+            "1",
+            Fraction(0),
+            Fraction(4),
+            "note",
+            pitches=(Pitch("D", 0, 4),),
+            sounding_pitches=(Pitch("D", 0, 4),),
+        ),
+    ]
+    return ScoreModel("Cell Bounds", [part], measures)
+
+
+def chord_overlapping_next_onset_score():
+    measure = MeasureContext(0, "1", Fraction(4), 0, "major", 4, 4)
+    part = ScorePart("P1", "Same Measure Part")
+    pitches = (Pitch("C", 0, 4),) * 14
+    part.events = [
+        ScoreEvent(
+            "P1",
+            0,
+            "1",
+            Fraction(0),
+            Fraction(1),
+            "chord",
+            pitches=pitches,
+            sounding_pitches=pitches,
+        ),
+        ScoreEvent("P1", 0, "1", Fraction(1), Fraction(3), "rest"),
+    ]
+    return ScoreModel("Same Measure Bounds", [part], [measure])
+
+
 class JianpuLayoutTests(unittest.TestCase):
     def test_event_x_scales_onset_within_measure(self):
         first_beat_x = event_x(Fraction(1, 2), Fraction(4), 80.0, 400.0)
@@ -497,6 +550,44 @@ class JianpuPdfTests(unittest.TestCase):
             output = Path(directory) / "ensemble-too-tall.pdf"
 
             with self.assertRaisesRegex(ValueError, "ensemble.*cannot fit"):
+                render_jianpu_pdf(score, output, notation="fixed")
+
+            self.assertFalse(output.exists())
+
+    def test_rejects_chord_token_crossing_measure_barline_into_next_event(self):
+        score = chord_crossing_measure_boundary_score()
+        chord_token = "+".join(["1"] * 9)
+        chord_width = stringWidth(chord_token, "Helvetica", 11)
+        page_width, _ = landscape(A4)
+        system_width = page_width - 36.0 - 150.0
+        measure_width = system_width / 2
+        chord_x = 150.0 + measure_width * Fraction(3, 4)
+        barline_x = 150.0 + measure_width
+        self.assertGreater(chord_x + chord_width, barline_x)
+        self.assertLess(chord_x + chord_width, page_width - 36.0)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "cross-measure-chord.pdf"
+
+            with self.assertRaisesRegex(ValueError, "rhythmic cell"):
+                render_jianpu_pdf(score, output, notation="fixed")
+
+            self.assertFalse(output.exists())
+
+    def test_rejects_chord_token_overlapping_next_onset_in_same_lane(self):
+        score = chord_overlapping_next_onset_score()
+        token = "+".join(["1"] * 14)
+        token_width = stringWidth(token, "Helvetica", 11)
+        system_width = landscape(A4)[0] - 36.0 - 150.0
+        measure_width = system_width
+        next_onset_x = 150.0 + measure_width / 4
+        self.assertGreater(150.0 + token_width, next_onset_x)
+        self.assertLess(150.0 + token_width, 150.0 + measure_width)
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "same-measure-overlap.pdf"
+
+            with self.assertRaisesRegex(ValueError, "rhythmic cell"):
                 render_jianpu_pdf(score, output, notation="fixed")
 
             self.assertFalse(output.exists())

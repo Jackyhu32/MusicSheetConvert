@@ -190,24 +190,60 @@ def render_jianpu_pdf(
                 measure_x + measure_width - measure_x,
             )
         for part in score.parts:
+            lane_events: dict[tuple[str, str], list[ScoreEvent]] = {}
             for event in part.events:
-                layout = measure_layout.get(event.measure_index)
-                if layout is None:
+                if event.measure_index not in measure_layout:
                     continue
-                position, measure = layout
-                measure_x = system_x + position * measure_width
-                x = event_x(event.onset, measure.duration, measure_x, measure_width)
-                token = _event_token(
-                    event,
-                    notation=notation,
-                    context=contexts.get(event.measure_index),
+                lane_events.setdefault(
+                    (event.staff_number, event.voice_id), []
+                ).append(event)
+
+            for events in lane_events.values():
+                ordered_events = sorted(
+                    events,
+                    key=lambda event: (
+                        measure_layout[event.measure_index][0],
+                        event.onset,
+                    ),
                 )
-                require_text_fits(
-                    token,
-                    "Helvetica",
-                    11,
-                    system_right - x,
-                )
+                for event_index, event in enumerate(ordered_events):
+                    position, measure = measure_layout[event.measure_index]
+                    measure_x = system_x + position * measure_width
+                    x = event_x(
+                        event.onset,
+                        measure.duration,
+                        measure_x,
+                        measure_width,
+                    )
+                    cell_right = measure_x + measure_width
+                    if event_index + 1 < len(ordered_events):
+                        next_event = ordered_events[event_index + 1]
+                        next_position, next_measure = measure_layout[
+                            next_event.measure_index
+                        ]
+                        next_x = event_x(
+                            next_event.onset,
+                            next_measure.duration,
+                            system_x + next_position * measure_width,
+                            measure_width,
+                        )
+                        cell_right = min(cell_right, next_x)
+
+                    token = _event_token(
+                        event,
+                        notation=notation,
+                        context=contexts.get(event.measure_index),
+                    )
+                    require_text_fits(
+                        token,
+                        "Helvetica",
+                        11,
+                        system_right - x,
+                    )
+                    if stringWidth(token, "Helvetica", 11) > cell_right - x:
+                        raise ValueError(
+                            f"event token {token!r} cannot fit within its rhythmic cell"
+                        )
 
     pages = measure_groups
     output = Path(output_path)
