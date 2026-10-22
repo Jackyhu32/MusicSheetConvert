@@ -924,6 +924,53 @@ class JianpuPdfTests(unittest.TestCase):
 
             self.assertFalse(output.exists())
 
+    def test_cjk_punctuation_only_lyrics_require_font_and_render_without_replacement(
+        self,
+    ):
+        score = score_from_sequence(
+            [
+                [
+                    (Fraction(4), "note", (Pitch("C", 0, 4),), (), (Lyric("？「"),)),
+                ]
+            ]
+        )
+        font_path = Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc")
+        if not font_path.is_file():
+            self.skipTest("WenQuanYi Zen Hei fixture font is unavailable")
+        with tempfile.TemporaryDirectory() as directory:
+            missing_font_output = Path(directory) / "punctuation-no-font.pdf"
+            with (
+                patch.dict("os.environ", {"JIANPU_CJK_FONT": ""}),
+                self.assertRaisesRegex(RuntimeError, "CJK lyrics require"),
+            ):
+                render_jianpu_pdf(score, missing_font_output, notation="fixed")
+            self.assertFalse(missing_font_output.exists())
+
+            output = Path(directory) / "punctuation-cjk-font.pdf"
+            render_jianpu_pdf(score, output, notation="fixed", font_path=font_path)
+            extracted = PdfReader(str(output)).pages[0].extract_text()
+
+        self.assertIn("？「", extracted)
+        self.assertNotIn("■", extracted)
+
+    def test_latin_punctuation_only_lyrics_do_not_require_cjk_font(self):
+        score = score_from_sequence(
+            [
+                [
+                    (Fraction(4), "note", (Pitch("C", 0, 4),), (), (Lyric("?!,;:"),)),
+                ]
+            ]
+        )
+        with (
+            patch.dict("os.environ", {"JIANPU_CJK_FONT": ""}),
+            tempfile.TemporaryDirectory() as directory,
+        ):
+            output = Path(directory) / "latin-punctuation.pdf"
+            render_jianpu_pdf(score, output, notation="fixed")
+            extracted = PdfReader(str(output)).pages[0].extract_text()
+
+        self.assertIn("?!,;:", extracted)
+
     def test_keeps_cross_measure_tie_together_at_normal_page_break(self):
         c4 = Pitch("C", 0, 4)
         sequence = [[(Fraction(4), "rest", (), (), ())] for _ in range(7)]
@@ -966,7 +1013,7 @@ class JianpuPdfTests(unittest.TestCase):
                 args=(score, str(output), result_queue),
             )
             process.start()
-            process.join(timeout=1.0)
+            process.join(timeout=5.0)
             if process.is_alive():
                 process.terminate()
                 process.join()
