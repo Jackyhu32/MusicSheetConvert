@@ -24,6 +24,7 @@ def event(
     voice="1",
     staff="1",
     location=None,
+    grace=False,
 ):
     if pitches is None:
         pitches = () if kind == "rest" else (Pitch("C", 0, 4),)
@@ -43,6 +44,7 @@ def event(
         ties,
         staff,
         source_location=location,
+        **({"grace": True} if grace else {}),
     )
 
 
@@ -96,6 +98,63 @@ class ScoreValidationTests(unittest.TestCase):
     def test_pickup_is_checked_against_declared_actual_duration(self):
         score = model([event(0, 0, 1, sounding_pitches=(Pitch("C", 0, 4),))], durations=(1,), pickup=True)
         self.assertEqual([], validate_score(score))
+
+    def test_zero_duration_grace_note_and_chord_do_not_occupy_measure_time(self):
+        score = model(
+            [
+                event(0, 0, 1, sounding_pitches=(Pitch("C", 0, 4),)),
+                event(
+                    0,
+                    1,
+                    0,
+                    pitches=(Pitch("D", 0, 4),),
+                    sounding_pitches=(Pitch("D", 0, 4),),
+                    grace=True,
+                ),
+                event(
+                    0,
+                    1,
+                    0,
+                    "chord",
+                    (Pitch("F", 0, 4), Pitch("A", 0, 4)),
+                    sounding_pitches=(Pitch("F", 0, 4), Pitch("A", 0, 4)),
+                    grace=True,
+                ),
+                event(0, 1, 3, sounding_pitches=(Pitch("E", 0, 4),)),
+            ]
+        )
+        self.assertEqual([], validate_score(score))
+
+    def test_zero_duration_non_grace_note_is_invalid(self):
+        score = model(
+            [
+                event(
+                    0,
+                    0,
+                    0,
+                    pitches=(Pitch("C", 0, 4),),
+                    sounding_pitches=(Pitch("C", 0, 4),),
+                ),
+                event(0, 0, 4, sounding_pitches=(Pitch("D", 0, 4),)),
+            ]
+        )
+        self.assertIn("invalid_duration", self.codes(score))
+
+    def test_trailing_gap_location_uses_last_event_in_time_order(self):
+        early = SourceLocation(page=1, system=1, measure_number="1")
+        late = SourceLocation(page=2, system=1, measure_number="1")
+        score = model(
+            [
+                event(0, 2, 1, sounding_pitches=(Pitch("D", 0, 4),), location=late),
+                event(0, 0, 1, sounding_pitches=(Pitch("C", 0, 4),), location=early),
+            ]
+        )
+        trailing_gap = next(
+            issue
+            for issue in validate_score(score)
+            if issue.code == "measure_gap" and issue.message.startswith("Voice ends")
+        )
+        self.assertEqual(late, trailing_gap.location)
 
     def test_measure_gap_overlap_and_overflow_have_stable_codes(self):
         cases = (

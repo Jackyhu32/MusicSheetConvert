@@ -460,6 +460,32 @@ class MusicXmlParsingTests(unittest.TestCase):
         self.assertTrue(model.measures[0].pickup)
         self.assertEqual(Fraction(1, 2), model.measures[0].duration)
 
+    def test_musicxml_grace_duration_is_preserved_in_score_model(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        from src.music_convert.musicxml_io import load_musicxml
+
+        grace_xml = """<?xml version="1.0"?>
+        <score-partwise version="4.0">
+          <part-list><score-part id="P"><part-name>Grace</part-name></score-part></part-list>
+          <part id="P"><measure number="1">
+            <attributes><divisions>1</divisions><time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+            <note><grace slash="yes"/><pitch><step>D</step><octave>4</octave></pitch>
+              <type>eighth</type><voice>1</voice></note>
+            <note><pitch><step>C</step><octave>4</octave></pitch>
+              <duration>4</duration><type>whole</type><voice>1</voice></note>
+          </measure></part>
+        </score-partwise>"""
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "grace.musicxml"
+            path.write_text(grace_xml, encoding="utf-8")
+            events = load_musicxml(path).parts[0].events
+
+        grace_event = next(event for event in events if event.pitches == (Pitch("D", 0, 4),))
+        self.assertTrue(grace_event.grace)
+        self.assertEqual(Fraction(0), grace_event.duration)
+
     def test_score_to_model_keeps_explicit_source_bytes(self):
         from music21 import converter
 

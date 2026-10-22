@@ -672,6 +672,7 @@ def score_to_model(
                             pitch_ties=ties,
                             staff_number=staff_number,
                             lyrics=lyrics,
+                            grace=bool(getattr(element.duration, "isGrace", False)),
                             source_location=SourceLocation(
                                 measure_number=str(
                                     getattr(measure, "number", measure_index + 1)

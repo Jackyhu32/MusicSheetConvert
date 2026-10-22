@@ -66,6 +66,7 @@ class ScoreEvent:
     staff_number: str = "1"
     lyrics: tuple[Lyric, ...] = ()
     source_location: SourceLocation | None = None
+    grace: bool = False
 
     @property
     def written_pitches(self) -> tuple[Pitch, ...]:
