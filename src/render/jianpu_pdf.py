@@ -136,12 +136,33 @@ def render_jianpu_pdf(
     system_x = 150.0
     system_right = page_width - 36.0
     measure_width = (system_right - system_x) / len(measures) if measures else 0.0
-    row_y = [page_height - 86 - 54 * index for index in range(len(score.parts))]
+    lane_spacing = 10.0
+    row_padding = 20.0
+    minimum_row_height = 54.0
+    part_lane_keys = [
+        sorted({(event.staff_number, event.voice_id) for event in part.events})
+        for part in score.parts
+    ]
+    row_heights = [
+        max(
+            minimum_row_height,
+            max(1, len(lane_keys)) * lane_spacing + row_padding,
+        )
+        for lane_keys in part_lane_keys
+    ]
+    row_y = []
+    current_y = page_height - 86
+    for row_height in row_heights:
+        row_y.append(current_y)
+        current_y -= row_height
 
     # Draw system-wide measure markers once, rather than once for each voice.
     if measures and row_y:
+        last_lane_count = max(1, len(part_lane_keys[-1]))
         system_top = row_y[0] + 18
-        system_bottom = row_y[-1] - 18
+        system_bottom = (
+            row_y[-1] - (last_lane_count - 1) * lane_spacing - 18
+        )
         pdf.setFont("Helvetica", 9)
         pdf.setLineWidth(0.7)
         for position, measure in enumerate(measures):
@@ -160,9 +181,7 @@ def render_jianpu_pdf(
         pdf.drawString(36, y, part.name)
         pdf.setFont("Helvetica", 11)
 
-        lane_keys = sorted(
-            {(event.staff_number, event.voice_id) for event in part.events}
-        )
+        lane_keys = part_lane_keys[part_index]
         lanes = {key: lane for lane, key in enumerate(lane_keys)}
         grouped_events: dict[tuple[int, str, str], list[ScoreEvent]] = {}
         for event in part.events:
@@ -173,7 +192,7 @@ def render_jianpu_pdf(
         for (measure_index, staff_number, voice_id), events in ordered_groups:
             position, measure = measure_layout[measure_index]
             measure_x = system_x + position * measure_width
-            lane_y = y - lanes[(staff_number, voice_id)] * 10
+            lane_y = y - lanes[(staff_number, voice_id)] * lane_spacing
             for event in sorted(
                 events,
                 key=lambda item: (item.onset, item.staff_number),
