@@ -4,22 +4,22 @@ Builds ``music21`` Streams directly and emits MusicXML / MIDI without any
 external OMR. Importable via:
     ``from src.music_convert.advanced import build_demo_score``
 """
+
 from __future__ import annotations
 
+from collections.abc import Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Sequence
 
 import music21
 from music21 import chord, key, meter, note, pitch, stream
 
-
 # Key-signature presets expressed with music21 ``key.Key`` objects.
 KEY_PRESETS = {
-    "C":  key.Key("C"),
-    "G":  key.Key("G"),
-    "D":  key.Key("D"),
-    "F":  key.Key("F"),
+    "C": key.Key("C"),
+    "G": key.Key("G"),
+    "D": key.Key("D"),
+    "F": key.Key("F"),
     "Bb": key.Key("B-"),
     "Eb": key.Key("E-"),
     "Am": key.Key("a"),
@@ -31,22 +31,25 @@ KEY_PRESETS = {
 @dataclass
 class NoteSpec:
     """Description of a single note (or a chord). Supports pitch list / duration / velocity / tie."""
-    pitches: Sequence[str]               # e.g. ["C4", "E4", "G4"] or ["C4"]
+
+    pitches: Sequence[str]  # e.g. ["C4", "E4", "G4"] or ["C4"]
     quarter_length: float = 1.0
     velocity: int = 80
-    tie: str | None = None              # "start" / "stop" / None
+    tie: str | None = None  # "start" / "stop" / None
 
 
 @dataclass
 class HandPart:
     """A single hand / part (e.g. right hand, left hand, piano)."""
+
     name: str
-    clef: str = "treble"                 # "treble" / "bass" / "alto"
-    instrument_program: int = 0          # MIDI program number
+    clef: str = "treble"  # "treble" / "bass" / "alto"
+    instrument_program: int = 0  # MIDI program number
     measures: list[list[NoteSpec]] = field(default_factory=list)
 
 
 # ---------------- Builders ----------------
+
 
 def build_grand_staff(
     right_hand_measures: Sequence[Sequence[NoteSpec]],
@@ -134,14 +137,14 @@ def build_key_demonstration() -> music21.stream.Score:
     part.insert(0, instrument_safe_program(0))
     part.append(meter.TimeSignature("4/4"))
 
-    for name, k in KEY_PRESETS.items():
+    for k in KEY_PRESETS.values():
         # Switch key signature for the new measure.
         m = stream.Measure()
         m.append(k)
         # I chord: build a major triad on the tonic.
         tonic = pitch.Pitch(k.tonic.nameWithOctave)
-        third = tonic.transpose(4)   # major third
-        fifth = tonic.transpose(7)   # perfect fifth
+        third = tonic.transpose(4)  # major third
+        fifth = tonic.transpose(7)  # perfect fifth
         c1 = chord.Chord([tonic, third, fifth])
         c1.quarterLength = 2.0
         m.append(c1)
@@ -163,20 +166,52 @@ def build_key_demonstration() -> music21.stream.Score:
 # Bach Prelude in C major (BWV 846), first 4 measures - the classic broken-chord pattern.
 BACH_PRELUDE_C_MAJOR_M1_M4 = [
     # Right hand: 8-note broken-chord pattern
-    [NoteSpec(["C5"], 1.0), NoteSpec(["E5"], 1.0), NoteSpec(["G5"], 1.0), NoteSpec(["C6"], 1.0),
-     NoteSpec(["E5"], 1.0), NoteSpec(["G5"], 1.0), NoteSpec(["C6"], 1.0), NoteSpec(["E6"], 1.0)],
-    [NoteSpec(["C5"], 1.0), NoteSpec(["D5"], 1.0), NoteSpec(["A5"], 1.0), NoteSpec(["D5"], 1.0),
-     NoteSpec(["C5"], 1.0), NoteSpec(["D5"], 1.0), NoteSpec(["A5"], 1.0), NoteSpec(["D5"], 1.0)],
-    [NoteSpec(["B4"], 1.0), NoteSpec(["D5"], 1.0), NoteSpec(["G5"], 1.0), NoteSpec(["D5"], 1.0),
-     NoteSpec(["B4"], 1.0), NoteSpec(["D5"], 1.0), NoteSpec(["G5"], 1.0), NoteSpec(["D5"], 1.0)],
-    [NoteSpec(["C5"], 1.0), NoteSpec(["E5"], 1.0), NoteSpec(["G5"], 1.0), NoteSpec(["C6"], 1.0),
-     NoteSpec(["E5"], 1.0), NoteSpec(["G5"], 1.0), NoteSpec(["C6"], 1.0), NoteSpec(["E6"], 1.0)],
+    [
+        NoteSpec(["C5"], 0.5),
+        NoteSpec(["E5"], 0.5),
+        NoteSpec(["G5"], 0.5),
+        NoteSpec(["C6"], 0.5),
+        NoteSpec(["E5"], 0.5),
+        NoteSpec(["G5"], 0.5),
+        NoteSpec(["C6"], 0.5),
+        NoteSpec(["E6"], 0.5),
+    ],
+    [
+        NoteSpec(["C5"], 0.5),
+        NoteSpec(["D5"], 0.5),
+        NoteSpec(["A5"], 0.5),
+        NoteSpec(["D5"], 0.5),
+        NoteSpec(["C5"], 0.5),
+        NoteSpec(["D5"], 0.5),
+        NoteSpec(["A5"], 0.5),
+        NoteSpec(["D5"], 0.5),
+    ],
+    [
+        NoteSpec(["B4"], 0.5),
+        NoteSpec(["D5"], 0.5),
+        NoteSpec(["G5"], 0.5),
+        NoteSpec(["D5"], 0.5),
+        NoteSpec(["B4"], 0.5),
+        NoteSpec(["D5"], 0.5),
+        NoteSpec(["G5"], 0.5),
+        NoteSpec(["D5"], 0.5),
+    ],
+    [
+        NoteSpec(["C5"], 0.5),
+        NoteSpec(["E5"], 0.5),
+        NoteSpec(["G5"], 0.5),
+        NoteSpec(["C6"], 0.5),
+        NoteSpec(["E5"], 0.5),
+        NoteSpec(["G5"], 0.5),
+        NoteSpec(["C6"], 0.5),
+        NoteSpec(["E6"], 0.5),
+    ],
 ]
 BACH_PRELUDE_C_MAJOR_LH = [
-    [NoteSpec(["C2", "G2", "C3", "E3"], 4.0), NoteSpec(["C2", "G2", "C3", "E3"], 4.0)],
-    [NoteSpec(["A1", "E2", "A2", "C3"], 4.0), NoteSpec(["A1", "E2", "A2", "C3"], 4.0)],
-    [NoteSpec(["G1", "D2", "G2", "B2"], 4.0), NoteSpec(["G1", "D2", "G2", "B2"], 4.0)],
-    [NoteSpec(["C2", "G2", "C3", "E3"], 4.0), NoteSpec(["C2", "G2", "C3", "E3"], 4.0)],
+    [NoteSpec(["C2", "G2", "C3", "E3"], 2.0), NoteSpec(["C2", "G2", "C3", "E3"], 2.0)],
+    [NoteSpec(["A1", "E2", "A2", "C3"], 2.0), NoteSpec(["A1", "E2", "A2", "C3"], 2.0)],
+    [NoteSpec(["G1", "D2", "G2", "B2"], 2.0), NoteSpec(["G1", "D2", "G2", "B2"], 2.0)],
+    [NoteSpec(["C2", "G2", "C3", "E3"], 2.0), NoteSpec(["C2", "G2", "C3", "E3"], 2.0)],
 ]
 
 
@@ -193,8 +228,10 @@ def build_bach_prelude_c_major() -> music21.stream.Score:
 
 # ---------------- Writer ----------------
 
-def write_score(score: music21.stream.Score, out_dir: str | Path,
-                base_name: str = "score") -> dict[str, Path]:
+
+def write_score(
+    score: music21.stream.Score, out_dir: str | Path, base_name: str = "score"
+) -> dict[str, Path]:
     """Write a Score to MusicXML + MIDI. Returns a dict of output paths."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -206,6 +243,7 @@ def write_score(score: music21.stream.Score, out_dir: str | Path,
 
 
 # ---------------- Internal helpers ----------------
+
 
 def _build_note_or_chord(spec: NoteSpec) -> music21.note.GeneralNote:
     if len(spec.pitches) == 1:
@@ -230,8 +268,9 @@ def instrument_safe_program(program: int):
     """
     try:
         from music21 import instrument as inst_mod
+
         instr = inst_mod.Instrument()
         instr.midiProgram = program
         return instr
-    except Exception:
+    except Exception:  # noqa: BLE001 - compatibility fallback across music21 versions
         return music21.instrument.Instrument()

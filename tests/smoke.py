@@ -20,7 +20,7 @@ SAMPLE_XML = """<?xml version="1.0" encoding="UTF-8" standalone="no"?>
     <measure number="1">
       <attributes>
         <divisions>1</divisions>
-        <key><fifths>0</fifths></key>
+        <key><fifths>0</fifths><mode>major</mode></key>
         <time><beats>4</beats><beat-type>4</beat-type></time>
         <clef><sign>G</sign><line>2</line></clef>
       </attributes>
@@ -47,11 +47,13 @@ def test_xml_to_midi_to_jianpu(tmp: Path) -> None:
     midi_path = core.musicxml_to_midi(xml_path, tmp / "sample.mid")
     assert midi_path.exists() and midi_path.stat().st_size > 0
 
+    import json
+
     jianpu = core.musicxml_to_jianpu_text(xml_path)
     print("jianpu:", jianpu)
-    assert "1" in jianpu and "2" in jianpu
-    # C5 -> 1+ (an octave up).
-    assert "1+" in jianpu
+    events = [json.loads(line) for line in jianpu.splitlines()
+              if json.loads(line)["type"] == "event"]
+    assert [event["pitches"] for event in events] == ["1", "2", "3", "4", "5", "6", "7", "1^1"]
 
 
 def test_jianpu_to_midi_roundtrip(tmp: Path) -> None:
