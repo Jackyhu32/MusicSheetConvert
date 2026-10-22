@@ -1,10 +1,14 @@
-from fractions import Fraction
-from pathlib import Path
 import tempfile
 import unittest
+from collections import Counter
+from dataclasses import replace
+from fractions import Fraction
+from pathlib import Path
+from unittest.mock import patch
 
 from pypdf import PdfReader
 
+from src.music_convert.jianpu import map_pitch
 from src.music_convert.musicxml_io import load_musicxml
 from src.render.jianpu_pdf import event_x, render_jianpu_pdf
 
@@ -17,49 +21,124 @@ class JianpuLayoutTests(unittest.TestCase):
         self.assertEqual(130.0, first_beat_x)
         self.assertLess(first_beat_x, later_beat_x)
 
-    def test_satbb_parts_share_onset_coordinates_and_labels_appear_once(self):
+    def test_event_x_rejects_zero_or_negative_measure_duration(self):
+        for duration in (Fraction(0), Fraction(-1)):
+            with self.subTest(duration=duration), self.assertRaises(ValueError):
+                event_x(Fraction(0), duration, 80.0, 400.0)
+
+    def test_renderer_aligns_beats_and_separates_staff_lanes(self):
         score = load_musicxml(
             Path(__file__).parent / "fixtures" / "satbb-two-measures.musicxml"
         )
-        measure = score.measures[0]
-        common_onset = Fraction(0)
-        measure_x = 150.0
-        measure_width = 120.0
-        coordinates_by_part = {
-            part.id: {
-                event_x(
-                    event.onset,
-                    measure.duration,
-                    measure_x,
-                    measure_width,
-                )
-                for event in part.events
-                if event.measure_index == measure.index
-                and event.onset == common_onset
-            }
-            for part in score.parts
-        }
-        coordinates_by_part = {
-            part_id: coordinates
-            for part_id, coordinates in coordinates_by_part.items()
-            if coordinates
-        }
+        soprano = score.parts[0]
+        soprano.events.extend(
+            replace(event, staff_number="2")
+            for event in tuple(soprano.events)
+            if event.staff_number == "1" and event.voice_id == "1"
+        )
 
-        self.assertEqual(5, len(coordinates_by_part))
-        self.assertEqual({frozenset({measure_x})}, {
-            frozenset(coordinates) for coordinates in coordinates_by_part.values()
-        })
+        canvas_instances = []
+
+        class RecordingCanvas:
+            def __init__(self, output_path, pagesize):
+                self.output_path = Path(output_path)
+                self.string_calls = []
+                self.line_calls = []
+                self.font = (None, None)
+                canvas_instances.append(self)
+
+            def setTitle(self, title):
+                pass
+
+            def setFont(self, name, size):
+                self.font = (name, size)
+
+            def setLineWidth(self, width):
+                pass
+
+            def drawString(self, x, y, text):
+                self.string_calls.append((self.font, x, y, text))
+
+            def drawCentredString(self, x, y, text):
+                self.string_calls.append((self.font, x, y, text))
+
+            def line(self, x1, y1, x2, y2):
+                self.line_calls.append((x1, y1, x2, y2))
+
+            def save(self):
+                self.output_path.write_bytes(b"%PDF-test")
 
         with tempfile.TemporaryDirectory() as directory:
-            output = Path(directory) / "satbb.pdf"
-            render_jianpu_pdf(score, output, notation="fixed")
-            text = "\n".join(
-                page.extract_text() or "" for page in PdfReader(str(output)).pages
-            )
+            output = Path(directory) / "satbb-spy.pdf"
+            with patch("src.render.jianpu_pdf.Canvas", RecordingCanvas):
+                render_jianpu_pdf(score, output, notation="fixed")
 
-        for part in score.parts:
-            with self.subTest(part=part.name):
-                self.assertEqual(1, text.count(part.name))
+        canvas = canvas_instances[-1]
+        note_calls = [
+            call for call in canvas.string_calls if call[0] == ("Helvetica", 11)
+        ]
+        part_labels = [
+            text
+            for font, _x, _y, text in canvas.string_calls
+            if font == ("Helvetica-Bold", 11)
+        ]
+        self.assertEqual([part.name for part in score.parts], part_labels)
+
+        common_onset_events = [
+            event
+            for part in score.parts
+            for event in part.events
+            if event.measure_index == 0 and event.onset == 0
+        ]
+
+        def token_for(event):
+            if event.kind == "rest":
+                return "0"
+            tokens = []
+            for pitch in event.effective_sounding_pitches:
+                degree, octave = map_pitch(pitch, notation="fixed")
+                suffix = f"^{octave}" if octave > 0 else f"v{-octave}" if octave < 0 else ""
+                tokens.append(f"{degree}{suffix}")
+            return "+".join(tokens)
+
+        expected_tokens = Counter(token_for(event) for event in common_onset_events)
+        actual_tokens = Counter(
+            text for _font, x, _y, text in note_calls if x == 150.0
+        )
+        self.assertEqual(expected_tokens, actual_tokens)
+
+        staff_two_source = next(
+            event
+            for event in soprano.events
+            if event.staff_number == "2"
+            and event.voice_id == "1"
+            and event.measure_index == 0
+            and event.onset == 0
+        )
+        token = token_for(staff_two_source)
+        soprano_label_y = next(
+            y
+            for font, x, y, text in canvas.string_calls
+            if font == ("Helvetica-Bold", 11) and x == 36 and text == soprano.name
+        )
+        staff_lane_y = {
+            y
+            for font, x, y, text in note_calls
+            if x == 150.0
+            and text == token
+            and soprano_label_y - 30 <= y <= soprano_label_y
+        }
+        self.assertEqual(2, len(staff_lane_y))
+
+        measure_numbers = [
+            text
+            for font, _x, _y, text in canvas.string_calls
+            if font == ("Helvetica", 9)
+        ]
+        self.assertEqual(
+            [measure.number for measure in score.measures], measure_numbers
+        )
+        self.assertEqual(len(score.measures), len(canvas.line_calls))
 
 
 class JianpuPdfTests(unittest.TestCase):

@@ -12,7 +12,6 @@ from src.music_convert.jianpu import map_pitch
 from src.music_convert.model import ScoreEvent, ScoreModel
 from src.music_convert.validation import validate_score
 
-
 _MAJOR_TONICS = {
     -7: "Cb", -6: "Gb", -5: "Db", -4: "Ab", -3: "Eb", -2: "Bb",
     -1: "F", 0: "C", 1: "G", 2: "D", 3: "A", 4: "E", 5: "B",
@@ -91,6 +90,8 @@ def event_x(
     measure_width: float,
 ) -> float:
     """Return a beat-proportional x coordinate within a measure."""
+    if measure_duration <= 0:
+        raise ValueError("measure_duration must be positive")
     return measure_x + float(onset / measure_duration) * measure_width
 
 
@@ -159,22 +160,20 @@ def render_jianpu_pdf(
         pdf.drawString(36, y, part.name)
         pdf.setFont("Helvetica", 11)
 
-        voice_events: dict[tuple[int, str], list[ScoreEvent]] = {}
-        for event in part.events:
-            voice_events.setdefault(
-                (event.measure_index, event.voice_id), []
-            ).append(event)
-        voice_ids = sorted({voice_id for _, voice_id in voice_events})
-        voice_lanes = {voice_id: lane for lane, voice_id in enumerate(voice_ids)}
-
-        ordered_groups = sorted(
-            voice_events.items(),
-            key=lambda item: (item[0][0], item[0][1]),
+        lane_keys = sorted(
+            {(event.staff_number, event.voice_id) for event in part.events}
         )
-        for (measure_index, voice_id), events in ordered_groups:
+        lanes = {key: lane for lane, key in enumerate(lane_keys)}
+        grouped_events: dict[tuple[int, str, str], list[ScoreEvent]] = {}
+        for event in part.events:
+            group_key = (event.measure_index, event.staff_number, event.voice_id)
+            grouped_events.setdefault(group_key, []).append(event)
+
+        ordered_groups = sorted(grouped_events.items())
+        for (measure_index, staff_number, voice_id), events in ordered_groups:
             position, measure = measure_layout[measure_index]
             measure_x = system_x + position * measure_width
-            lane_y = y - voice_lanes[voice_id] * 10
+            lane_y = y - lanes[(staff_number, voice_id)] * 10
             for event in sorted(
                 events,
                 key=lambda item: (item.onset, item.staff_number),
