@@ -1,4 +1,5 @@
 import copy
+import multiprocessing
 import tempfile
 import unittest
 from collections import Counter
@@ -150,6 +151,26 @@ def score_from_sequence(
             )
             onset += item_duration
     return ScoreModel(title, [part], measures)
+
+
+def _render_in_child(score, output_path, result_queue):
+    try:
+        render_jianpu_pdf(score, output_path, notation="fixed")
+    except ValueError as error:
+        result_queue.put((type(error).__name__, str(error)))
+    else:
+        result_queue.put(("success", ""))
+
+
+def tied_measure_chain(count):
+    c4 = Pitch("C", 0, 4)
+    sequence = []
+    for index in range(count):
+        tie_state = (
+            "start" if index == 0 else "stop" if index == count - 1 else "continue"
+        )
+        sequence.append([(Fraction(4), "note", (c4,), (tie_state,), ())])
+    return score_from_sequence(sequence, duration=(Fraction(4),) * count)
 
 
 def dense_score(part_count=6, lane_count=8, measure_count=10):
@@ -926,6 +947,36 @@ class JianpuPdfTests(unittest.TestCase):
         self.assertEqual(1, len(canvas.path_calls))
         path_commands = canvas.path_calls[0][0]
         self.assertLess(path_commands[0][1], path_commands[1][-2])
+
+    def test_tie_chain_at_system_capacity_groups_and_renders(self):
+        score = tied_measure_chain(8)
+
+        canvas = render_with_canvas_spy(score)
+
+        self.assertEqual(0, canvas.page_breaks)
+        self.assertEqual(7, len(canvas.path_calls))
+
+    def test_linked_chain_longer_than_system_fails_promptly_before_output(self):
+        score = tied_measure_chain(9)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "oversized-tie-chain.pdf"
+            result_queue = multiprocessing.Queue()
+            process = multiprocessing.Process(
+                target=_render_in_child,
+                args=(score, str(output), result_queue),
+            )
+            process.start()
+            process.join(timeout=1.0)
+            if process.is_alive():
+                process.terminate()
+                process.join()
+                self.fail("renderer hung grouping a linked chain over system capacity")
+
+            self.assertEqual(0, process.exitcode)
+            result = result_queue.get(timeout=1.0)
+            self.assertEqual("ValueError", result[0])
+            self.assertIn("linked tie/slur chain", result[1])
+            self.assertFalse(output.exists())
 
     def test_canvas_places_numbered_lyrics_on_distinct_verse_rows(self):
         score = score_from_sequence(

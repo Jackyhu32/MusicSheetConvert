@@ -323,30 +323,40 @@ def _measure_groups(measures, maximum, relationships):
     measure_positions = {
         measure.index: position for position, measure in enumerate(measures)
     }
-    intervals = [
+    intervals = sorted(
         (
             measure_positions[source.measure_index],
             measure_positions[target.measure_index],
         )
         for source, target in relationships
-    ]
+    )
+    linked_components: list[list[int]] = []
+    for start, stop in intervals:
+        if linked_components and start <= linked_components[-1][1]:
+            linked_components[-1][1] = max(linked_components[-1][1], stop)
+        else:
+            linked_components.append([start, stop])
+
+    for start, stop in linked_components:
+        component_size = stop - start + 1
+        if component_size > maximum:
+            raise ValueError(
+                "linked tie/slur chain spans "
+                f"{component_size} measures, exceeding the system limit of {maximum}"
+            )
+
     groups = []
     offset = 0
     while offset < len(measures):
         end = min(offset + maximum, len(measures))
-        while True:
-            crossing = [
-                (start, stop)
-                for start, stop in intervals
-                if start < end <= stop and start >= offset
-            ]
-            if not crossing:
+        for start, stop in linked_components:
+            if start < end <= stop:
+                end = start
                 break
-            earliest_start = min(start for start, _stop in crossing)
-            if earliest_start > offset:
-                end = earliest_start
-            else:
-                end = max(stop for start, stop in crossing if start == offset) + 1
+        if end <= offset:
+            raise ValueError(
+                "linked tie/slur chain cannot be placed in a rendered system"
+            )
         groups.append(measures[offset:end])
         offset = end
     return groups
