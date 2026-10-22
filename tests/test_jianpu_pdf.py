@@ -7,8 +7,10 @@ from pathlib import Path
 from unittest.mock import patch
 
 from pypdf import PdfReader
+from reportlab.lib.pagesizes import A4, landscape
 
 from src.music_convert.jianpu import map_pitch
+from src.music_convert.model import MeasureContext, ScoreEvent, ScoreModel, ScorePart
 from src.music_convert.musicxml_io import load_musicxml
 from src.render.jianpu_pdf import event_x, render_jianpu_pdf
 
@@ -18,6 +20,8 @@ class RecordingCanvas:
         self.output_path = Path(output_path)
         self.string_calls = []
         self.line_calls = []
+        self.draw_coordinates = []
+        self.page_breaks = 0
         self.font = (None, None)
 
     def setTitle(self, title):
@@ -31,12 +35,18 @@ class RecordingCanvas:
 
     def drawString(self, x, y, text):
         self.string_calls.append((self.font, x, y, text))
+        self.draw_coordinates.append((x, y))
 
     def drawCentredString(self, x, y, text):
         self.string_calls.append((self.font, x, y, text))
+        self.draw_coordinates.append((x, y))
 
     def line(self, x1, y1, x2, y2):
         self.line_calls.append((x1, y1, x2, y2))
+        self.draw_coordinates.extend(((x1, y1), (x2, y2)))
+
+    def showPage(self):
+        self.page_breaks += 1
 
     def save(self):
         self.output_path.write_bytes(b"%PDF-test")
@@ -49,6 +59,40 @@ def render_with_canvas_spy(score):
         with patch("src.render.jianpu_pdf.Canvas", return_value=canvas):
             render_jianpu_pdf(score, output, notation="fixed")
     return canvas
+
+
+def dense_score(part_count=6, lane_count=8, measure_count=10):
+    measures = [
+        MeasureContext(
+            index=index,
+            number=f"M{index + 1}",
+            duration=Fraction(4),
+            fifths=0,
+            mode="major",
+            beats=4,
+            beat_type=4,
+        )
+        for index in range(measure_count)
+    ]
+    parts = []
+    for part_index in range(part_count):
+        part_id = f"P{part_index + 1}"
+        part = ScorePart(part_id, f"Source Part {part_index + 1}")
+        part.events = [
+            ScoreEvent(
+                part_id,
+                measure.index,
+                "1",
+                Fraction(0),
+                Fraction(4),
+                "rest",
+                staff_number=str(lane + 1),
+            )
+            for measure in measures
+            for lane in range(lane_count)
+        ]
+        parts.append(part)
+    return ScoreModel("Dense Layout", parts, measures)
 
 
 class JianpuLayoutTests(unittest.TestCase):
@@ -345,6 +389,67 @@ class JianpuPdfTests(unittest.TestCase):
 
             with self.assertRaisesRegex(ValueError, "validation"):
                 render_jianpu_pdf(score, output)
+
+            self.assertFalse(output.exists())
+
+    def test_dense_score_paginates_with_all_draw_coordinates_inside_page(self):
+        score = dense_score()
+        source_part_names = [part.name for part in score.parts]
+        source_events = [tuple(part.events) for part in score.parts]
+        source_measure_numbers = [measure.number for measure in score.measures]
+
+        canvas = render_with_canvas_spy(score)
+
+        page_width, page_height = landscape(A4)
+        self.assertGreater(canvas.page_breaks + 1, 1)
+        self.assertTrue(canvas.draw_coordinates)
+        for x, y in canvas.draw_coordinates:
+            self.assertGreaterEqual(x, 0)
+            self.assertLessEqual(x, page_width)
+            self.assertGreaterEqual(y, 0)
+            self.assertLessEqual(y, page_height)
+
+        rendered_labels = [
+            text
+            for font, x, _y, text in canvas.string_calls
+            if font == ("Helvetica-Bold", 11) and x == 36
+        ]
+        self.assertEqual(set(source_part_names), set(rendered_labels))
+        self.assertEqual(
+            sum(len(part.events) for part in score.parts),
+            sum(
+                font == ("Helvetica", 11) and text == "0"
+                for font, _x, _y, text in canvas.string_calls
+            ),
+        )
+        rendered_measure_numbers = {
+            text
+            for font, _x, _y, text in canvas.string_calls
+            if font == ("Helvetica", 9)
+        }
+        self.assertEqual(set(source_measure_numbers), rendered_measure_numbers)
+        self.assertEqual(source_events, [tuple(part.events) for part in score.parts])
+        self.assertEqual(source_part_names, [part.name for part in score.parts])
+
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "dense-score.pdf"
+            render_jianpu_pdf(score, output, notation="fixed")
+            pages = PdfReader(str(output)).pages
+
+        self.assertGreater(len(pages), 1)
+        extracted_text = "\n".join(page.extract_text() or "" for page in pages)
+        for part_name in source_part_names:
+            self.assertIn(part_name, extracted_text)
+        for measure_number in source_measure_numbers:
+            self.assertIn(measure_number, extracted_text)
+
+    def test_rejects_single_part_whose_lanes_cannot_fit_vertically(self):
+        score = dense_score(part_count=1, lane_count=50, measure_count=1)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "too-tall.pdf"
+
+            with self.assertRaisesRegex(ValueError, "cannot fit"):
+                render_jianpu_pdf(score, output, notation="fixed")
 
             self.assertFalse(output.exists())
 

@@ -1,4 +1,4 @@
-"""Basic one-page Jianpu PDF rendering from a validated score model."""
+"""Paginated Jianpu PDF rendering from a validated score model."""
 
 from __future__ import annotations
 
@@ -104,7 +104,7 @@ def render_jianpu_pdf(
     title: str | None = None,
     font_path: str | Path | None = None,
 ) -> Path:
-    """Render each part's event tokens on one landscape A4 PDF page.
+    """Render complete measure systems across landscape A4 pages.
 
     ``font_path`` is accepted for API compatibility; this basic renderer uses
     ReportLab's built-in Latin font. CJK font registration is handled by a
@@ -119,23 +119,19 @@ def render_jianpu_pdf(
         raise ValueError(f"score validation failed: {codes}")
 
     contexts = _movable_contexts(score, tonic) if notation == "movable" else {}
-    output = Path(output_path)
-    output.parent.mkdir(parents=True, exist_ok=True)
+    measures = sorted(score.measures, key=lambda item: item.index)
     page_width, page_height = landscape(A4)
     document_title = score.title if title is None else title
-    pdf = Canvas(str(output), pagesize=(page_width, page_height))
-    pdf.setTitle(document_title)
-    pdf.setFont("Helvetica-Bold", 18)
-    pdf.drawCentredString(page_width / 2, page_height - 42, document_title)
-
-    measures = sorted(score.measures, key=lambda item: item.index)
-    measure_layout = {
-        measure.index: (position, measure)
-        for position, measure in enumerate(measures)
-    }
     system_x = 150.0
     system_right = page_width - 36.0
-    measure_width = (system_right - system_x) / len(measures) if measures else 0.0
+    available_width = system_right - system_x
+    minimum_measure_width = 80.0
+    measures_per_system = max(1, int(available_width // minimum_measure_width))
+    measure_groups = [
+        measures[offset:offset + measures_per_system]
+        for offset in range(0, len(measures), measures_per_system)
+    ] or [[]]
+
     lane_spacing = 10.0
     row_padding = 20.0
     minimum_row_height = 54.0
@@ -150,68 +146,111 @@ def render_jianpu_pdf(
         )
         for lane_keys in part_lane_keys
     ]
-    row_y = []
-    current_y = page_height - 86
-    for row_height in row_heights:
-        row_y.append(current_y)
-        current_y -= row_height
-
-    # Draw system-wide measure markers once, rather than once for each voice.
-    if measures and row_y:
-        last_lane_count = max(1, len(part_lane_keys[-1]))
-        system_top = row_y[0] + 18
-        system_bottom = (
-            row_y[-1] - (last_lane_count - 1) * lane_spacing - 18
-        )
-        pdf.setFont("Helvetica", 9)
-        pdf.setLineWidth(0.7)
-        for position, measure in enumerate(measures):
-            measure_x = system_x + position * measure_width
-            pdf.drawString(measure_x, system_top + 4, measure.number)
-            pdf.line(
-                measure_x + measure_width,
-                system_top,
-                measure_x + measure_width,
-                system_bottom,
+    available_height = page_height - 86.0 - 36.0
+    part_groups: list[list[int]] = []
+    current_group: list[int] = []
+    current_height = 0.0
+    for part_index, row_height in enumerate(row_heights):
+        if row_height > available_height:
+            raise ValueError(
+                f"part {score.parts[part_index].name!r} lane layout cannot fit "
+                "on a landscape page"
             )
+        if current_group and current_height + row_height > available_height:
+            part_groups.append(current_group)
+            current_group = []
+            current_height = 0.0
+        current_group.append(part_index)
+        current_height += row_height
+    if current_group:
+        part_groups.append(current_group)
+    if not part_groups:
+        part_groups = [[]]
 
-    for part_index, part in enumerate(score.parts):
-        y = row_y[part_index]
-        pdf.setFont("Helvetica-Bold", 11)
-        pdf.drawString(36, y, part.name)
-        pdf.setFont("Helvetica", 11)
+    pages = [
+        (measure_group, part_group)
+        for measure_group in measure_groups
+        for part_group in part_groups
+    ]
+    output = Path(output_path)
+    output.parent.mkdir(parents=True, exist_ok=True)
+    pdf = Canvas(str(output), pagesize=(page_width, page_height))
+    pdf.setTitle(document_title)
 
-        lane_keys = part_lane_keys[part_index]
-        lanes = {key: lane for lane, key in enumerate(lane_keys)}
-        grouped_events: dict[tuple[int, str, str], list[ScoreEvent]] = {}
-        for event in part.events:
-            group_key = (event.measure_index, event.staff_number, event.voice_id)
-            grouped_events.setdefault(group_key, []).append(event)
+    for page_index, (page_measures, page_parts) in enumerate(pages):
+        pdf.setFont("Helvetica-Bold", 18)
+        pdf.drawCentredString(page_width / 2, page_height - 42, document_title)
 
-        ordered_groups = sorted(grouped_events.items())
-        for (measure_index, staff_number, voice_id), events in ordered_groups:
-            position, measure = measure_layout[measure_index]
-            measure_x = system_x + position * measure_width
-            lane_y = y - lanes[(staff_number, voice_id)] * lane_spacing
-            for event in sorted(
-                events,
-                key=lambda item: (item.onset, item.staff_number),
+        measure_width = available_width / len(page_measures) if page_measures else 0.0
+        measure_layout = {
+            measure.index: (position, measure)
+            for position, measure in enumerate(page_measures)
+        }
+        row_y = {}
+        current_y = page_height - 86
+        for part_index in page_parts:
+            row_y[part_index] = current_y
+            current_y -= row_heights[part_index]
+
+        if page_measures and page_parts:
+            last_part_index = page_parts[-1]
+            last_lane_count = max(1, len(part_lane_keys[last_part_index]))
+            system_top = row_y[page_parts[0]] + 18
+            system_bottom = (
+                row_y[last_part_index] - (last_lane_count - 1) * lane_spacing - 18
+            )
+            pdf.setFont("Helvetica", 9)
+            pdf.setLineWidth(0.7)
+            for position, measure in enumerate(page_measures):
+                measure_x = system_x + position * measure_width
+                pdf.drawString(measure_x, system_top + 4, measure.number)
+                barline_x = measure_x + measure_width
+                pdf.line(barline_x, system_top, barline_x, system_bottom)
+
+        for part_index in page_parts:
+            part = score.parts[part_index]
+            y = row_y[part_index]
+            pdf.setFont("Helvetica-Bold", 11)
+            pdf.drawString(36, y, part.name)
+            pdf.setFont("Helvetica", 11)
+
+            lane_keys = part_lane_keys[part_index]
+            lanes = {key: lane for lane, key in enumerate(lane_keys)}
+            grouped_events: dict[tuple[int, str, str], list[ScoreEvent]] = {}
+            for event in part.events:
+                if event.measure_index not in measure_layout:
+                    continue
+                group_key = (event.measure_index, event.staff_number, event.voice_id)
+                grouped_events.setdefault(group_key, []).append(event)
+
+            for (measure_index, staff_number, voice_id), events in sorted(
+                grouped_events.items()
             ):
-                token = _event_token(
-                    event,
-                    notation=notation,
-                    context=contexts.get(event.measure_index),
-                )
-                pdf.drawString(
-                    event_x(
-                        event.onset,
-                        measure.duration,
-                        measure_x,
-                        measure_width,
-                    ),
-                    lane_y,
-                    token,
-                )
+                position, measure = measure_layout[measure_index]
+                measure_x = system_x + position * measure_width
+                lane_y = y - lanes[(staff_number, voice_id)] * lane_spacing
+                for event in sorted(
+                    events,
+                    key=lambda item: (item.onset, item.staff_number),
+                ):
+                    token = _event_token(
+                        event,
+                        notation=notation,
+                        context=contexts.get(event.measure_index),
+                    )
+                    pdf.drawString(
+                        event_x(
+                            event.onset,
+                            measure.duration,
+                            measure_x,
+                            measure_width,
+                        ),
+                        lane_y,
+                        token,
+                    )
+
+        if page_index < len(pages) - 1:
+            pdf.showPage()
 
     pdf.save()
     if not output.is_file() or output.stat().st_size == 0:
