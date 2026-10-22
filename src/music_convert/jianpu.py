@@ -52,7 +52,7 @@ def map_pitch(
         raise ValueError("key_mode must be 'major' or 'minor'")
     if not isinstance(pitch, Pitch):
         raise ValueError("pitch must be a Pitch")
-    if pitch.step not in _STEPS:
+    if not isinstance(pitch.step, str) or pitch.step not in _STEPS:
         raise ValueError("pitch.step must be a note name from A to G")
     if isinstance(pitch.alter, bool) or not isinstance(pitch.alter, int):
         raise ValueError("pitch.alter must be an integer")
@@ -61,7 +61,7 @@ def map_pitch(
 
     if notation == "fixed":
         root_step, root_alter = "C", 0
-        root_position = 4 * len(_STEPS) + _STEPS.index(root_step)
+        tonic_pitch_class = _NATURAL_SEMITONES[root_step]
     else:
         if tonic is None or key_mode is None:
             raise ValueError("movable notation requires both tonic and key_mode")
@@ -69,11 +69,14 @@ def map_pitch(
         if key_mode == "minor":
             minor_step = root_step
             minor_alter = root_alter
+            tonic_pitch_class = (
+                _NATURAL_SEMITONES[minor_step] + minor_alter
+            ) % 12
             root_step, root_alter = _relative_major(minor_step, minor_alter)
-            # The minor tonic is degree 6, five diatonic steps after the major tonic.
-            root_position = (4 * len(_STEPS) + _STEPS.index(minor_step)) - 5
         else:
-            root_position = 4 * len(_STEPS) + _STEPS.index(root_step)
+            tonic_pitch_class = (
+                _NATURAL_SEMITONES[root_step] + root_alter
+            ) % 12
 
     root_pitch_class = (
         _NATURAL_SEMITONES[root_step] + root_alter
@@ -87,6 +90,11 @@ def map_pitch(
     chromatic_alter = pitch.alter - expected_alter
     prefix = "#" * chromatic_alter if chromatic_alter > 0 else "b" * -chromatic_alter
 
-    pitch_position = pitch.octave * len(_STEPS) + _STEPS.index(pitch.step)
-    octave_offset = (pitch_position - root_position) // len(_STEPS)
+    tonic_at_octave_four = 5 * 12 + tonic_pitch_class
+    pitch_semitone = (
+        (pitch.octave + 1) * 12
+        + _NATURAL_SEMITONES[pitch.step]
+        + pitch.alter
+    )
+    octave_offset = (pitch_semitone - tonic_at_octave_four) // 12
     return f"{prefix}{degree_index + 1}", octave_offset

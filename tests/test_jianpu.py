@@ -45,6 +45,20 @@ class JianpuMappingTests(unittest.TestCase):
             map_pitch(Pitch("G", -1, 4), tonic="C", key_mode="major"),
         )
 
+    def test_octave_offset_uses_absolute_pitch_not_spelling_position(self):
+        self.assertEqual(
+            ("#7", 0),
+            map_pitch(Pitch("B", 1, 3), tonic="C", key_mode="major"),
+        )
+        self.assertEqual(
+            ("1", 0),
+            map_pitch(Pitch("C", 0, 4), tonic="C", key_mode="major"),
+        )
+
+    def test_non_string_pitch_step_raises_value_error(self):
+        with self.assertRaises(ValueError):
+            map_pitch(Pitch(1, 0, 4), notation="fixed")
+
     def test_octave_offset_is_relative_to_tonic_octave(self):
         self.assertEqual(
             ("1", 1),
