@@ -4,9 +4,10 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from src.main import build_parser, main, run_pipeline
+from src.main import _write_review_report, build_parser, main, run_pipeline
+from src.music_convert.model import ReviewIssue, SourceLocation
 from src.music_convert.musicxml_io import load_musicxml
-from src.music_convert.validation import validate_score
+from src.music_convert.validation import ValidationIssue, validate_score
 
 ROOT = Path(__file__).parent
 FIXTURES = ROOT / "fixtures"
@@ -394,6 +395,137 @@ class CliOutputContractTests(unittest.TestCase):
                     if path.is_file()
                 },
             )
+
+    def test_later_page_missing_meter_report_uses_page_local_source_location(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "later-meter.pdf"
+            source.touch()
+            page_images = [root / "page-1.png", root / "page-2.png"]
+            for image in page_images:
+                image.touch()
+
+            def recognize(image, output_directory, _config):
+                page_index = page_images.index(image)
+                name = (
+                    "omr-page-1.musicxml" if page_index == 0 else "omr-page-2.musicxml"
+                )
+                content = (FIXTURES / name).read_bytes()
+                content = content.replace(
+                    b"<time><beats>4</beats><beat-type>4</beat-type></time>", b""
+                )
+                return _write_output(Path(output_directory) / name, content)
+
+            with (
+                patch("src.main.pdf_to_images", return_value=page_images),
+                patch(
+                    "src.main.preprocess_image", side_effect=lambda path, _dest: path
+                ),
+                patch("src.main.is_audiveris_available", return_value=True),
+                patch("src.main.image_to_musicxml", side_effect=recognize),
+            ):
+                results = run_pipeline(source, root / "output")
+
+            result = results[0]
+            report = json.loads(result.review_report.read_text(encoding="utf-8"))
+            later_page_issue = next(
+                issue
+                for issue in report["validation_issues"]
+                if issue["code"] == "missing_meter" and issue["measure_number"] == "2"
+            )
+            self.assertEqual(2, later_page_issue["location"]["page"])
+            self.assertEqual("8", later_page_issue["location"]["measure_number"])
+            self.assertIn("meter", later_page_issue["message"])
+            self.assertEqual("review_only", result.publication_state)
+
+    def test_review_report_serializes_full_diagnostics_as_json(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            location = SourceLocation(page=2, system=3, measure_number="5")
+            review_issue = ReviewIssue(
+                "uncertain_pitch",
+                "Confirm the accidental",
+                location,
+                candidates=("F4", "F#4"),
+                confidence=0.625,
+            )
+            model = load_musicxml(FIXTURES / "satbb-two-measures.musicxml")
+            model.review_issues.append(review_issue)
+            validation_issue = ValidationIssue(
+                "review_required",
+                "P-S",
+                "5",
+                "Source pitch needs confirmation.",
+                location,
+            )
+
+            report_path = _write_review_report(
+                root,
+                root / "score.pdf",
+                2,
+                model,
+                [validation_issue],
+                publication_state="review_only",
+            )
+            serialized = report_path.read_text(encoding="utf-8")
+            report = json.loads(serialized)
+            json.dumps(report, allow_nan=False)
+
+            validation_row = next(
+                row
+                for row in report["validation_issues"]
+                if row["code"] == "review_required"
+            )
+            self.assertEqual(
+                "Source pitch needs confirmation.", validation_row["message"]
+            )
+            review_row = next(
+                row
+                for row in report["validation_issues"]
+                if row["code"] == "uncertain_pitch"
+            )
+            self.assertEqual("Confirm the accidental", review_row["message"])
+            self.assertEqual(
+                {"page": 2, "system": 3, "measure_number": "5"},
+                review_row["location"],
+            )
+            self.assertEqual(["F4", "F#4"], review_row["candidates"])
+            self.assertEqual(0.625, review_row["confidence"])
+
+    def test_bach_and_key_demonstration_apply_cli_title(self):
+        for demo in ("bach_prelude", "key_demonstration"):
+            with self.subTest(demo=demo), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "output"
+                observed_titles = []
+
+                def write_pdf(model, path, *, notation, tonic, titles=observed_titles):
+                    titles.append(model.title)
+                    return _write_output(path)
+
+                with patch("src.main.render_jianpu_pdf", side_effect=write_pdf):
+                    self.assertEqual(
+                        0,
+                        main(
+                            [
+                                "--demo",
+                                demo,
+                                "--title",
+                                "Spec Title",
+                                "--out",
+                                str(output),
+                                "--formats",
+                                "pdf",
+                                "--mode",
+                                "fixed",
+                            ]
+                        ),
+                    )
+
+                self.assertEqual(["Spec Title"], observed_titles)
+                self.assertEqual(
+                    1,
+                    len([path for path in output.rglob("*") if path.is_file()]),
+                )
 
     def test_unresolved_omr_boundary_publishes_review_only_report(self):
         with tempfile.TemporaryDirectory() as directory:

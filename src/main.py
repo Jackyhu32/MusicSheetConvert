@@ -17,6 +17,7 @@ from __future__ import annotations
 import argparse
 import json
 import logging
+import math
 import os
 import re
 import shutil
@@ -108,7 +109,7 @@ def _write_review_report(
     issues,
     *,
     publication_state: str,
-    missing_meter: tuple[str, ...] = (),
+    missing_meter: tuple[tuple[int, str], ...] = (),
 ) -> Path:
     issue_rows = []
     for issue in issues:
@@ -118,6 +119,7 @@ def _write_review_report(
                 "code": issue.code,
                 "part_id": issue.part_id,
                 "measure_number": issue.measure_number,
+                "message": issue.message,
                 "location": (
                     {
                         "page": location.page,
@@ -136,6 +138,7 @@ def _write_review_report(
                 "code": review.code,
                 "part_id": None,
                 "measure_number": location.measure_number if location else None,
+                "message": review.message,
                 "location": (
                     {
                         "page": location.page,
@@ -145,16 +148,21 @@ def _write_review_report(
                     if location is not None
                     else None
                 ),
+                "candidates": [str(candidate) for candidate in review.candidates],
+                "confidence": (
+                    review.confidence
+                    if review.confidence is None or math.isfinite(review.confidence)
+                    else None
+                ),
             }
         )
-    for measure_number in missing_meter:
+    for measure_index, measure_number in missing_meter:
         event_location = next(
             (
                 event.source_location
                 for part in model.parts
                 for event in part.events
-                if event.source_location
-                and event.source_location.measure_number == measure_number
+                if event.measure_index == measure_index and event.source_location
             ),
             None,
         )
@@ -163,6 +171,7 @@ def _write_review_report(
                 "code": "missing_meter",
                 "part_id": None,
                 "measure_number": measure_number,
+                "message": f"No explicit or inherited meter for measure {measure_number}.",
                 "location": (
                     {
                         "page": event_location.page,
@@ -266,7 +275,7 @@ def _run_pipeline_in_directory(
     if mode not in ("movable", "fixed"):
         raise ValueError("mode must be 'movable' or 'fixed'")
     missing_meter = tuple(
-        measure.number
+        (measure.index, measure.number)
         for measure in model.measures
         if measure.beats is None or measure.beat_type is None
     )
@@ -289,7 +298,7 @@ def _run_pipeline_in_directory(
         return [result]
 
     if missing_meter:
-        numbers = ", ".join(missing_meter)
+        numbers = ", ".join(number for _index, number in missing_meter)
         raise ValueError(
             f"missing_meter: no explicit or inherited meter for measure(s) {numbers}"
         )
@@ -587,9 +596,13 @@ def run_demo(
         base_name = f"chord_progression_{key_name.lower()}"
     elif demo == "bach_prelude":
         score = build_bach_prelude_c_major()
+        if title is not None:
+            score.metadata.title = title
         base_name = "bach_prelude_m1_m4"
     else:  # key_demonstration
         score = build_key_demonstration()
+        if title is not None:
+            score.metadata.title = title
         base_name = "key_demonstration"
 
     with tempfile.TemporaryDirectory(prefix="score-demo-") as directory:
