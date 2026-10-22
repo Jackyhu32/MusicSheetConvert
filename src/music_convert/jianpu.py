@@ -61,7 +61,7 @@ def map_pitch(
 
     if notation == "fixed":
         root_step, root_alter = "C", 0
-        tonic_pitch_class = _NATURAL_SEMITONES[root_step]
+        tonic_semitone = _NATURAL_SEMITONES[root_step] + root_alter
     else:
         if tonic is None or key_mode is None:
             raise ValueError("movable notation requires both tonic and key_mode")
@@ -69,14 +69,10 @@ def map_pitch(
         if key_mode == "minor":
             minor_step = root_step
             minor_alter = root_alter
-            tonic_pitch_class = (
-                _NATURAL_SEMITONES[minor_step] + minor_alter
-            ) % 12
+            tonic_semitone = _NATURAL_SEMITONES[minor_step] + minor_alter
             root_step, root_alter = _relative_major(minor_step, minor_alter)
         else:
-            tonic_pitch_class = (
-                _NATURAL_SEMITONES[root_step] + root_alter
-            ) % 12
+            tonic_semitone = _NATURAL_SEMITONES[root_step] + root_alter
 
     root_pitch_class = (
         _NATURAL_SEMITONES[root_step] + root_alter
@@ -90,7 +86,7 @@ def map_pitch(
     chromatic_alter = pitch.alter - expected_alter
     prefix = "#" * chromatic_alter if chromatic_alter > 0 else "b" * -chromatic_alter
 
-    tonic_at_octave_four = 5 * 12 + tonic_pitch_class
+    tonic_at_octave_four = 5 * 12 + tonic_semitone
     pitch_semitone = (
         (pitch.octave + 1) * 12
         + _NATURAL_SEMITONES[pitch.step]
