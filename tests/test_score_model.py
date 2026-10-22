@@ -354,6 +354,7 @@ class MusicXmlParsingTests(unittest.TestCase):
         second_measure = [event for event in soprano.events if event.measure_index == 1]
 
         self.assertEqual(2, len(model.measures))
+        self.assertEqual(["1"] * 4, [event.voice_id for event in second_measure])
         self.assertEqual(
             [
                 ("note", Fraction(0), Fraction(1, 3)),
