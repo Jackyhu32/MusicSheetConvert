@@ -61,6 +61,30 @@ def _seconds(beats: Fraction, bpm: float) -> float:
     return float(beats * 60 / Fraction(str(bpm)))
 
 
+def _resolution_for_score(model, measure_starts: dict[int, Fraction]) -> int:
+    """Return an exact MIDI PPQ resolution or fail rather than quantize."""
+    max_resolution = 32760
+    resolution = 480
+    for part in model.parts:
+        for event in part.events:
+            measure_start = measure_starts[event.measure_index]
+            absolute_onset = measure_start + event.onset
+            absolute_end = absolute_onset + event.duration
+            resolution = lcm(
+                resolution,
+                measure_start.denominator,
+                absolute_onset.denominator,
+                event.duration.denominator,
+                absolute_end.denominator,
+            )
+            if resolution > max_resolution:
+                raise ValueError(
+                    "midi_resolution_overflow: exact timing requires a PPQ "
+                    f"resolution above the supported maximum of {max_resolution}"
+                )
+    return resolution
+
+
 def musicxml_to_midi(xml_path: str | Path, midi_path: str | Path,
                      options: ConvertOptions | None = None) -> Path:
     """Convert validated ScoreModel events to MIDI, retaining parts and voices."""
@@ -76,13 +100,7 @@ def musicxml_to_midi(xml_path: str | Path, midi_path: str | Path,
         measure_starts[measure.index] = cursor
         cursor += measure.duration
 
-    resolution = 480
-    for part in model.parts:
-        for event in part.events:
-            absolute_onset = measure_starts[event.measure_index] + event.onset
-            absolute_end = absolute_onset + event.duration
-            resolution = lcm(resolution, absolute_onset.denominator, absolute_end.denominator)
-    resolution = min(resolution, 32760)
+    resolution = _resolution_for_score(model, measure_starts)
     pm = pretty_midi.PrettyMIDI(initial_tempo=float(bpm), resolution=resolution)
     for part in model.parts:
         voices: dict[tuple[str, str], list[tuple[Fraction, object]]] = {}

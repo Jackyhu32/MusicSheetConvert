@@ -1,5 +1,6 @@
 import json
 import tempfile
+from fractions import Fraction
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -7,6 +8,7 @@ from unittest.mock import patch
 import pretty_midi
 
 from src.music_convert import core
+from src.music_convert.model import MeasureContext, Pitch, ScoreEvent, ScoreModel, ScorePart
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -288,6 +290,53 @@ class ConversionCoreTests(unittest.TestCase):
             output = Path(directory) / "not-created" / "result.mid"
             with self.assertRaisesRegex(ValueError, "measure_overflow"):
                 core.musicxml_to_midi(source, output)
+            self.assertFalse(output.exists())
+            self.assertFalse(output.parent.exists())
+
+    def test_midi_fails_closed_when_exact_resolution_exceeds_ppq_limit(self):
+        short_duration = Fraction(1, 65521)
+        model = ScoreModel(
+            title="Resolution Overflow",
+            parts=[ScorePart(
+                id="P",
+                name="Voice",
+                events=[
+                    ScoreEvent(
+                        part_id="P",
+                        measure_index=0,
+                        voice_id="1",
+                        onset=Fraction(0),
+                        duration=short_duration,
+                        kind="note",
+                        pitches=(Pitch("C", 0, 4),),
+                        sounding_pitches=(Pitch("C", 0, 4),),
+                    ),
+                    ScoreEvent(
+                        part_id="P",
+                        measure_index=0,
+                        voice_id="1",
+                        onset=short_duration,
+                        duration=Fraction(4) - short_duration,
+                        kind="rest",
+                    ),
+                ],
+            )],
+            measures=[MeasureContext(
+                index=0,
+                number="1",
+                duration=Fraction(4),
+                fifths=0,
+                mode="major",
+                beats=4,
+                beat_type=4,
+            )],
+        )
+        self.assertEqual([], core.validate_score(model))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "not-created" / "overflow.mid"
+            with patch("src.music_convert.core.load_musicxml", return_value=model):
+                with self.assertRaisesRegex(ValueError, "midi_resolution_overflow"):
+                    core.musicxml_to_midi("valid-score.musicxml", output)
             self.assertFalse(output.exists())
             self.assertFalse(output.parent.exists())
 
