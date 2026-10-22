@@ -63,3 +63,4 @@ data/audiveris_out/
 *.mxl
 *.musicxml
 !data/samples/*.musicxml
+!tests/fixtures/*.musicxml
