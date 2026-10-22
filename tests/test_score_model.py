@@ -71,6 +71,50 @@ class ScoreModelTests(unittest.TestCase):
         self.assertEqual(lyrics, event.lyrics)
         self.assertEqual("3", event.source_location.measure_number)
 
+    def test_event_preserves_explicit_slur_start_and_stop_marks(self):
+        event = ScoreEvent(
+            part_id="P",
+            measure_index=0,
+            voice_id="1",
+            onset=Fraction(0),
+            duration=Fraction(1),
+            kind="note",
+            pitches=(Pitch("C", 0, 4),),
+            sounding_pitches=(Pitch("C", 0, 4),),
+            slurs=(("start", "2"),),
+        )
+
+        self.assertEqual((("start", "2"),), event.slurs)
+
+    def test_musicxml_slur_start_and_stop_are_preserved_independently_of_ties(self):
+        from pathlib import Path
+        from tempfile import TemporaryDirectory
+
+        from src.music_convert.musicxml_io import load_musicxml
+
+        slur_xml = """<?xml version="1.0"?>
+        <score-partwise version="4.0">
+          <part-list><score-part id="P"><part-name>Slur</part-name></score-part></part-list>
+          <part id="P"><measure number="1">
+            <attributes><divisions>1</divisions><key><fifths>0</fifths><mode>major</mode></key>
+              <time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+            <note><pitch><step>C</step><octave>4</octave></pitch><duration>2</duration>
+              <voice>1</voice><notations><slur type="start" number="2"/></notations></note>
+            <note><pitch><step>D</step><octave>4</octave></pitch><duration>2</duration>
+              <voice>1</voice><notations><slur type="stop" number="2"/></notations></note>
+          </measure></part>
+        </score-partwise>"""
+        with TemporaryDirectory() as directory:
+            path = Path(directory) / "slur.musicxml"
+            path.write_text(slur_xml, encoding="utf-8")
+            events = load_musicxml(path).parts[0].events
+
+        self.assertEqual(
+            [(("start", "2"),), (("stop", "2"),)],
+            [event.slurs for event in events],
+        )
+        self.assertEqual([("none",), ("none",)], [event.pitch_ties for event in events])
+
     def test_event_keeps_written_and_sounding_pitches_independently(self):
         written_pitch = Pitch("C", 0, 4)
         sounding_pitch = Pitch("B", -1, 3)
@@ -482,7 +526,9 @@ class MusicXmlParsingTests(unittest.TestCase):
             path.write_text(grace_xml, encoding="utf-8")
             events = load_musicxml(path).parts[0].events
 
-        grace_event = next(event for event in events if event.pitches == (Pitch("D", 0, 4),))
+        grace_event = next(
+            event for event in events if event.pitches == (Pitch("D", 0, 4),)
+        )
         self.assertTrue(grace_event.grace)
         self.assertEqual(Fraction(0), grace_event.duration)
 

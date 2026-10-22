@@ -152,6 +152,17 @@ def _xml_tie(note_element: ET.Element) -> str:
     return "none"
 
 
+def _xml_slurs(note_element: ET.Element) -> list[tuple[str, str]]:
+    marks = []
+    for element in note_element.iter():
+        if _local_name(element) != "slur":
+            continue
+        slur_type = element.get("type")
+        if slur_type in {"start", "stop", "continue"}:
+            marks.append((slur_type, str(element.get("number") or "1")))
+    return marks
+
+
 def _source_details(source: bytes | None) -> dict[str, Any] | None:
     """Supplement music21's stream with MusicXML-only ids and lyric extenders."""
     if source is None:
@@ -244,6 +255,7 @@ def _source_details(source: bytes | None) -> dict[str, Any] | None:
                             "staff": str(staff),
                             "pitches": [],
                             "ties": [],
+                            "slurs": [],
                             "lyrics": [],
                             "duration": duration,
                         }
@@ -253,6 +265,7 @@ def _source_details(source: bytes | None) -> dict[str, Any] | None:
                     if pitch_value is not None:
                         event["pitches"].append(pitch_value)
                         event["ties"].append(_xml_tie(element))
+                    event["slurs"].extend(_xml_slurs(element))
                     event["lyrics"].extend(_xml_lyrics(element))
                     if not is_chord_tone:
                         cursor += duration
@@ -671,6 +684,11 @@ def score_to_model(
                             sounding_pitches=sounding,
                             pitch_ties=ties,
                             staff_number=staff_number,
+                            slurs=(
+                                tuple(dict.fromkeys(source_event["slurs"]))
+                                if source_event
+                                else ()
+                            ),
                             lyrics=lyrics,
                             grace=bool(getattr(element.duration, "isGrace", False)),
                             source_location=SourceLocation(

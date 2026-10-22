@@ -67,6 +67,7 @@ class ScoreEvent:
     lyrics: tuple[Lyric, ...] = ()
     source_location: SourceLocation | None = None
     grace: bool = False
+    slurs: tuple[tuple[Literal["start", "stop", "continue"], str], ...] = ()
 
     @property
     def written_pitches(self) -> tuple[Pitch, ...]:
