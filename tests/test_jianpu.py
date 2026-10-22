@@ -35,6 +35,16 @@ class JianpuMappingTests(unittest.TestCase):
             map_pitch(Pitch("B", -1, 4), tonic="C", key_mode="major"),
         )
 
+    def test_enharmonic_spellings_keep_distinct_degrees(self):
+        self.assertEqual(
+            ("#4", 0),
+            map_pitch(Pitch("F", 1, 4), tonic="C", key_mode="major"),
+        )
+        self.assertEqual(
+            ("b5", 0),
+            map_pitch(Pitch("G", -1, 4), tonic="C", key_mode="major"),
+        )
+
     def test_octave_offset_is_relative_to_tonic_octave(self):
         self.assertEqual(
             ("1", 1),
