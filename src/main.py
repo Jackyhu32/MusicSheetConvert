@@ -15,7 +15,12 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
+import re
+import shutil
 import sys
+import tempfile
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -55,7 +60,7 @@ class PipelineResult:
     rendered_png: Path | None = None
 
 
-def run_pipeline(
+def _run_pipeline_in_directory(
     input_path: Path,
     out_dir: Path,
     bpm: int = 90,
@@ -147,6 +152,52 @@ def run_pipeline(
             log.warning("MuseScore unavailable, skipping render: %s", error)
 
     return [result]
+
+
+
+def run_pipeline(
+    input_path: Path,
+    out_dir: Path,
+    bpm: int = 90,
+    render_png: bool = False,
+    skip_ocr: bool = False,
+    audiveris_cfg: AudiverisConfig | None = None,
+) -> list[PipelineResult]:
+    """Run a document pipeline transactionally and publish a unique bundle."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    run_id = uuid.uuid4().hex
+    safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "-", input_path.stem).strip(".-")
+    safe_stem = safe_stem or "document"
+    staging_dir = Path(
+        tempfile.mkdtemp(prefix=f".staging-{run_id}-", dir=out_dir)
+    )
+    final_dir = out_dir / f"{safe_stem}-{run_id}"
+
+    try:
+        results = _run_pipeline_in_directory(
+            input_path=input_path,
+            out_dir=staging_dir,
+            bpm=bpm,
+            render_png=render_png,
+            skip_ocr=skip_ocr,
+            audiveris_cfg=audiveris_cfg,
+        )
+        os.rename(staging_dir, final_dir)
+    except BaseException:
+        shutil.rmtree(staging_dir, ignore_errors=True)
+        raise
+
+    for result in results:
+        for attribute in ("image", "musicxml", "midi", "jianpu_txt", "rendered_png"):
+            value = getattr(result, attribute)
+            if value is None:
+                continue
+            try:
+                relative_path = value.relative_to(staging_dir)
+            except ValueError:
+                continue
+            setattr(result, attribute, final_dir / relative_path)
+    return results
 
 
 def build_parser() -> argparse.ArgumentParser:
