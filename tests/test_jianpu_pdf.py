@@ -1,3 +1,4 @@
+import copy
 import tempfile
 import unittest
 from collections import Counter
@@ -12,6 +13,7 @@ from reportlab.pdfbase.pdfmetrics import stringWidth
 
 from src.music_convert.jianpu import map_pitch
 from src.music_convert.model import (
+    Lyric,
     MeasureContext,
     Pitch,
     ScoreEvent,
@@ -27,6 +29,8 @@ class RecordingCanvas:
         self.output_path = Path(output_path)
         self.string_calls = []
         self.line_calls = []
+        self.circle_calls = []
+        self.path_calls = []
         self.draw_coordinates = []
         self.page_breaks = 0
         self.font = (None, None)
@@ -52,6 +56,19 @@ class RecordingCanvas:
         self.line_calls.append((x1, y1, x2, y2))
         self.draw_coordinates.extend(((x1, y1), (x2, y2)))
 
+    def circle(self, x, y, radius, stroke=1, fill=0):
+        self.circle_calls.append((x, y, radius, stroke, fill))
+        self.draw_coordinates.append((x, y))
+
+    def beginPath(self):
+        return RecordingPath()
+
+    def drawPath(self, path, stroke=1, fill=0):
+        self.path_calls.append((path.commands, stroke, fill))
+        for command in path.commands:
+            coordinates = command[1:]
+            self.draw_coordinates.extend(zip(coordinates[::2], coordinates[1::2]))
+
     def showPage(self):
         self.page_breaks += 1
 
@@ -59,13 +76,80 @@ class RecordingCanvas:
         self.output_path.write_bytes(b"%PDF-test")
 
 
-def render_with_canvas_spy(score):
+class RecordingPath:
+    def __init__(self):
+        self.commands = []
+
+    def moveTo(self, x, y):
+        self.commands.append(("moveTo", x, y))
+
+    def curveTo(self, x1, y1, x2, y2, x3, y3):
+        self.commands.append(("curveTo", x1, y1, x2, y2, x3, y3))
+
+
+def render_with_canvas_spy(score, **options):
+    ignore_ties = options.pop("ignore_ties", False)
+    strip_lyrics = options.pop("strip_lyrics", True)
+    score = copy.deepcopy(score)
+    for part in score.parts:
+        part.events = [
+            replace(
+                event,
+                lyrics=() if strip_lyrics else event.lyrics,
+                **({"pitch_ties": ()} if ignore_ties else {}),
+            )
+            for event in part.events
+        ]
     with tempfile.TemporaryDirectory() as directory:
         output = Path(directory) / "layout-spy.pdf"
         canvas = RecordingCanvas(output, (0, 0))
+        options.setdefault("notation", "fixed")
         with patch("src.render.jianpu_pdf.Canvas", return_value=canvas):
-            render_jianpu_pdf(score, output, notation="fixed")
+            render_jianpu_pdf(score, output, **options)
     return canvas
+
+
+def score_from_sequence(
+    sequence, *, duration=None, measure_modes=None, title="Notation Test"
+):
+    """Build one-lane measures from duration/kind/pitches/ties/lyrics tuples."""
+    measures = []
+    part = ScorePart("P1", "Test Part")
+    for measure_index, items in enumerate(sequence):
+        measure_duration = (
+            duration[measure_index] if isinstance(duration, tuple) else duration
+        )
+        if measure_duration is None:
+            measure_duration = sum((item[0] for item in items), Fraction(0))
+        measures.append(
+            MeasureContext(
+                measure_index,
+                str(measure_index + 1),
+                measure_duration,
+                0,
+                measure_modes[measure_index] if measure_modes else "major",
+                None,
+                None,
+            )
+        )
+        onset = Fraction(0)
+        for item_duration, kind, pitches, ties, lyrics in items:
+            part.events.append(
+                ScoreEvent(
+                    "P1",
+                    measure_index,
+                    "1",
+                    onset,
+                    item_duration,
+                    kind,
+                    pitches=pitches,
+                    sounding_pitches=pitches,
+                    pitch_ties=ties,
+                    lyrics=lyrics,
+                )
+            )
+            onset += item_duration
+    return ScoreModel(title, [part], measures)
 
 
 def dense_score(part_count=6, lane_count=8, measure_count=10):
@@ -192,7 +276,7 @@ class JianpuLayoutTests(unittest.TestCase):
         score = load_musicxml(
             Path(__file__).parent / "fixtures" / "satbb-two-measures.musicxml"
         )
-        canvas = render_with_canvas_spy(score)
+        canvas = render_with_canvas_spy(score, ignore_ties=True)
         part = score.parts[0]
         measure_by_index = {measure.index: measure for measure in score.measures}
         system_x = 150.0
@@ -205,12 +289,14 @@ class JianpuLayoutTests(unittest.TestCase):
         target_events = [
             event
             for event in part.events
-            if (event.measure_index, event.onset) in ((0, Fraction(3, 2)), (1, Fraction(2)))
+            if (event.measure_index, event.onset)
+            in ((0, Fraction(3, 2)), (1, Fraction(2)))
         ]
 
         for event in target_events:
             measure_position = next(
-                index for index, item in enumerate(score.measures)
+                index
+                for index, item in enumerate(score.measures)
                 if item.index == event.measure_index
             )
             expected_x = (
@@ -224,20 +310,20 @@ class JianpuLayoutTests(unittest.TestCase):
             else:
                 token_parts = []
                 for pitch in event.effective_sounding_pitches:
-                    degree, octave = map_pitch(pitch, notation="fixed")
-                    suffix = f"^{octave}" if octave > 0 else f"v{-octave}" if octave < 0 else ""
-                    token_parts.append(f"{degree}{suffix}")
+                    degree, _octave = map_pitch(pitch, notation="fixed")
+                    token_parts.append(degree)
                 token = "+".join(token_parts)
             self.assertIn(
-                (expected_x, token), note_calls,
+                (expected_x, token),
+                note_calls,
                 f"event at measure {event.measure_index}, beat {event.onset}",
             )
 
-        first_measure_event_x = next(
-            x for x, token in note_calls if token == "2+#4"
-        )
+        first_measure_event_x = next(x for x, token in note_calls if token == "2+#4")
         next_measure_event_x = next(
-            x for x, token in note_calls if token == "5" and x > system_x + measure_width
+            x
+            for x, token in note_calls
+            if token == "5" and x > system_x + measure_width
         )
         self.assertGreater(next_measure_event_x, first_measure_event_x)
 
@@ -255,21 +341,21 @@ class JianpuLayoutTests(unittest.TestCase):
             and event.kind == "note"
         }
         self.assertEqual({"1", "2"}, set(voice_events))
-        canvas = render_with_canvas_spy(score)
+        canvas = render_with_canvas_spy(score, ignore_ties=True)
 
-        def event_y(event):
-            degree, octave = map_pitch(
-                event.effective_sounding_pitches[0], notation="fixed"
-            )
-            suffix = f"^{octave}" if octave > 0 else f"v{-octave}" if octave < 0 else ""
-            token = f"{degree}{suffix}"
-            return next(
-                y
-                for font, x, y, text in canvas.string_calls
-                if font == ("Helvetica", 11) and x == 150.0 and text == token
-            )
-
-        self.assertNotEqual(event_y(voice_events["1"]), event_y(voice_events["2"]))
+        soprano_label_y = next(
+            y
+            for font, x, y, text in canvas.string_calls
+            if font == ("Helvetica-Bold", 11) and x == 36 and text == soprano.name
+        )
+        lane_note_ys = {
+            y
+            for font, x, y, text in canvas.string_calls
+            if font == ("Helvetica", 11)
+            and x == 150.0
+            and soprano_label_y - 35 <= y <= soprano_label_y
+        }
+        self.assertGreaterEqual(len(lane_note_ys), 2)
 
     def test_dynamic_part_rows_keep_lower_part_clear_of_all_lanes(self):
         score = load_musicxml(
@@ -283,7 +369,7 @@ class JianpuLayoutTests(unittest.TestCase):
                 for event in source_events
                 if event.staff_number == "1" and event.voice_id == "1"
             )
-        canvas = render_with_canvas_spy(score)
+        canvas = render_with_canvas_spy(score, ignore_ties=True)
 
         label_positions = {
             text: index
@@ -296,7 +382,7 @@ class JianpuLayoutTests(unittest.TestCase):
         soprano_lane_ys = [
             y
             for font, _x, y, _text in canvas.string_calls[
-                soprano_label_index + 1:alto_label_index
+                soprano_label_index + 1 : alto_label_index
             ]
             if font == ("Helvetica", 11)
         ]
@@ -343,9 +429,22 @@ class JianpuLayoutTests(unittest.TestCase):
             def line(self, x1, y1, x2, y2):
                 self.line_calls.append((x1, y1, x2, y2))
 
+            def circle(self, x, y, radius, stroke=1, fill=0):
+                pass
+
+            def beginPath(self):
+                return RecordingPath()
+
+            def drawPath(self, path, stroke=1, fill=0):
+                pass
+
             def save(self):
                 self.output_path.write_bytes(b"%PDF-test")
 
+        for part in score.parts:
+            part.events = [
+                replace(event, lyrics=(), pitch_ties=()) for event in part.events
+            ]
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "satbb-spy.pdf"
             with patch("src.render.jianpu_pdf.Canvas", RecordingCanvas):
@@ -374,15 +473,12 @@ class JianpuLayoutTests(unittest.TestCase):
                 return "0"
             tokens = []
             for pitch in event.effective_sounding_pitches:
-                degree, octave = map_pitch(pitch, notation="fixed")
-                suffix = f"^{octave}" if octave > 0 else f"v{-octave}" if octave < 0 else ""
-                tokens.append(f"{degree}{suffix}")
+                degree, _octave = map_pitch(pitch, notation="fixed")
+                tokens.append(degree)
             return "+".join(tokens)
 
         expected_tokens = Counter(token_for(event) for event in common_onset_events)
-        actual_tokens = Counter(
-            text for _font, x, _y, text in note_calls if x == 150.0
-        )
+        actual_tokens = Counter(text for _font, x, _y, text in note_calls if x == 150.0)
         self.assertEqual(expected_tokens, actual_tokens)
 
         staff_two_source = next(
@@ -416,7 +512,8 @@ class JianpuLayoutTests(unittest.TestCase):
         self.assertEqual(
             [measure.number for measure in score.measures], measure_numbers
         )
-        self.assertEqual(len(score.measures), len(canvas.line_calls))
+        barlines = [call for call in canvas.line_calls if call[0] == call[2]]
+        self.assertEqual(len(score.measures), len(barlines))
 
 
 class JianpuPdfTests(unittest.TestCase):
@@ -424,10 +521,21 @@ class JianpuPdfTests(unittest.TestCase):
         return Path(__file__).parent / "fixtures" / name
 
     def test_writes_readable_one_page_pdf_and_creates_parent_directory(self):
-        score = load_musicxml(self.fixture("g-major-two-bars.musicxml"))
+        score = score_from_sequence(
+            [
+                [
+                    (Fraction(1), "note", (Pitch("C", 0, 4),), (), ()),
+                    (Fraction(1), "note", (Pitch("D", 0, 4),), (), ()),
+                    (Fraction(2), "rest", (), (), ()),
+                ],
+            ]
+        )
+        score.parts[0].name = "Soprano"
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "nested" / "jianpu.pdf"
-            result = render_jianpu_pdf(score, output, title="Renderer Test")
+            result = render_jianpu_pdf(
+                score, output, title="Renderer Test", notation="fixed"
+            )
 
             self.assertEqual(output, result)
             self.assertTrue(output.exists())
@@ -437,7 +545,7 @@ class JianpuPdfTests(unittest.TestCase):
             text = "\n".join(page.extract_text() or "" for page in reader.pages)
             self.assertIn("Renderer Test", text)
             self.assertIn("Soprano", text)
-            self.assertRegex(text, r"1\s+2\s+3\s+4\s+5\s+6\s+7\s+0")
+            self.assertRegex(text, r"1\s+2\s+0")
 
     def test_uses_each_measure_key_mode_and_effective_sounding_pitch(self):
         score = load_musicxml(self.fixture("c-major-to-a-minor.musicxml"))
@@ -450,16 +558,36 @@ class JianpuPdfTests(unittest.TestCase):
         self.assertIn("1", text)
         self.assertIn("6", text)
 
-        satbb = load_musicxml(self.fixture("satbb-two-measures.musicxml"))
+        measure = MeasureContext(0, "1", Fraction(4), 0, "major", 4, 4)
+        tenor = ScorePart("P1", "Tenor")
+        tenor.events = [
+            ScoreEvent(
+                "P1",
+                0,
+                "1",
+                Fraction(0),
+                Fraction(1),
+                "note",
+                pitches=(Pitch("C", 0, 4),),
+                sounding_pitches=(Pitch("C", 0, 3),),
+            ),
+            ScoreEvent("P1", 0, "1", Fraction(1), Fraction(3), "rest"),
+        ]
+        sounding_score = ScoreModel("Sounding Pitch", [tenor], [measure])
         with tempfile.TemporaryDirectory() as directory:
             output = Path(directory) / "sounding-pitch.pdf"
-            render_jianpu_pdf(satbb, output, notation="fixed")
-            pages = PdfReader(str(output)).pages
-            text = "\n".join(page.extract_text() or "" for page in pages)
+            render_jianpu_pdf(sounding_score, output, notation="fixed")
+            text = PdfReader(str(output)).pages[0].extract_text()
 
-        # The first Tenor pitch is written C4 but sounds C3.
         self.assertIn("Tenor", text)
-        self.assertIn("1v", text)
+        self.assertIn("1", text)
+        canvas = render_with_canvas_spy(sounding_score)
+        note_y = next(
+            y
+            for font, _x, y, token in canvas.string_calls
+            if font == ("Helvetica", 11) and token == "1"
+        )
+        self.assertTrue(any(y < note_y for _x, y, *_ in canvas.circle_calls))
 
     def test_rejects_score_with_validation_issues_before_writing(self):
         score = load_musicxml(self.fixture("g-major-two-bars.musicxml"))
@@ -543,7 +671,6 @@ class JianpuPdfTests(unittest.TestCase):
 
             self.assertFalse(output.exists())
 
-
     def test_rejects_ensemble_whose_complete_lane_rows_cannot_fit(self):
         score = dense_score(part_count=6, lane_count=8, measure_count=1)
         with tempfile.TemporaryDirectory() as directory:
@@ -622,6 +749,267 @@ class JianpuPdfTests(unittest.TestCase):
                             score, output, notation="fixed", **render_options
                         )
                     self.assertFalse(output.exists())
+
+    def test_canvas_draws_quarter_dotted_short_rest_chord_and_octave_marks(self):
+        c4, d4, e4, f4 = (Pitch(step, 0, 4) for step in "CDEF")
+        c5, g3 = Pitch("C", 0, 5), Pitch("G", 0, 3)
+        score = score_from_sequence(
+            [
+                [
+                    (Fraction(1), "note", (c4,), (), ()),
+                    (Fraction(3, 2), "note", (d4,), (), ()),
+                    (Fraction(1, 2), "note", (e4,), (), ()),
+                    (Fraction(1, 4), "note", (f4,), (), ()),
+                    (Fraction(1, 4), "rest", (), (), ()),
+                    (Fraction(1), "chord", (c5, g3), (), ()),
+                ]
+            ]
+        )
+
+        canvas = render_with_canvas_spy(score)
+        note_tokens = [
+            text
+            for font, _x, _y, text in canvas.string_calls
+            if font == ("Helvetica", 11)
+        ]
+        expected_tokens = [
+            "0"
+            if event.kind == "rest"
+            else "+".join(
+                map_pitch(pitch, notation="fixed")[0]
+                for pitch in event.effective_sounding_pitches
+            )
+            for event in score.parts[0].events
+        ]
+        self.assertEqual(expected_tokens, note_tokens)
+        self.assertEqual(3, len(canvas.circle_calls))
+        self.assertEqual([], canvas.path_calls)
+        quarter_x, quarter_y = next(
+            (x, y)
+            for font, x, y, token in canvas.string_calls
+            if font == ("Helvetica", 11) and token == "1"
+        )
+        self.assertFalse(
+            any(abs(x - quarter_x) < 10 for x, _y, *_rest in canvas.circle_calls)
+        )
+        self.assertFalse(
+            any(
+                x1 == quarter_x and y1 < quarter_y
+                for x1, y1, _x2, _y2 in canvas.line_calls
+            )
+        )
+        self.assertGreaterEqual(
+            sum(y1 == y2 for _x1, y1, _x2, y2 in canvas.line_calls), 5
+        )
+
+    def test_canvas_draws_long_note_duration_dashes(self):
+        score = score_from_sequence(
+            [
+                [
+                    (Fraction(4), "note", (Pitch("C", 0, 4),), (), ()),
+                ]
+            ]
+        )
+
+        canvas = render_with_canvas_spy(score)
+
+        self.assertGreaterEqual(
+            sum(y1 == y2 for _x1, y1, _x2, y2 in canvas.line_calls), 2
+        )
+
+    def test_canvas_draws_one_curve_for_only_the_pitch_tied_in_a_chord(self):
+        c4, e4, f4 = Pitch("C", 0, 4), Pitch("E", 0, 4), Pitch("F", 0, 4)
+        score = score_from_sequence(
+            [
+                [
+                    (Fraction(1), "chord", (c4, e4), ("start", "none"), ()),
+                    (Fraction(1), "chord", (c4, f4), ("stop", "none"), ()),
+                    (Fraction(2), "rest", (), (), ()),
+                ]
+            ],
+            duration=(Fraction(4),),
+        )
+
+        canvas = render_with_canvas_spy(score)
+
+        self.assertEqual(1, len(canvas.path_calls))
+        self.assertEqual("curveTo", canvas.path_calls[0][0][1][0])
+
+    def test_movable_note_tokens_match_map_pitch_in_major_and_minor_contexts(self):
+        c4 = Pitch("C", 0, 4)
+        score = score_from_sequence(
+            [
+                [(Fraction(4), "note", (c4,), (), ())],
+                [(Fraction(4), "note", (c4,), (), ())],
+            ],
+            duration=(Fraction(4), Fraction(4)),
+            measure_modes=("major", "minor"),
+        )
+
+        canvas = render_with_canvas_spy(score, notation="movable", tonic="C")
+        note_tokens = [
+            text
+            for font, _x, _y, text in canvas.string_calls
+            if font == ("Helvetica", 11)
+        ]
+        expected = [
+            map_pitch(c4, tonic="C", key_mode=mode, notation="movable")[0]
+            for mode in ("major", "minor")
+        ]
+
+        self.assertEqual(expected, note_tokens)
+
+    def test_english_lyrics_render_and_are_extractable_without_cjk_font(self):
+        score = score_from_sequence(
+            [
+                [
+                    (
+                        Fraction(4),
+                        "note",
+                        (Pitch("C", 0, 4),),
+                        (),
+                        (Lyric("hello", syllabic="begin", extend=True),),
+                    ),
+                ]
+            ]
+        )
+        with (
+            patch.dict("os.environ", {"JIANPU_CJK_FONT": ""}),
+            tempfile.TemporaryDirectory() as directory,
+        ):
+            output = Path(directory) / "english-lyrics.pdf"
+            render_jianpu_pdf(score, output, notation="fixed")
+            text = PdfReader(str(output)).pages[0].extract_text()
+
+        self.assertIn("hello", text)
+        self.assertIn("-", text)
+
+    def test_cjk_lyrics_require_an_explicitly_configured_font(self):
+        score = score_from_sequence(
+            [
+                [
+                    (Fraction(4), "note", (Pitch("C", 0, 4),), (), (Lyric("春天"),)),
+                ]
+            ]
+        )
+        with (
+            patch.dict("os.environ", {"JIANPU_CJK_FONT": ""}),
+            tempfile.TemporaryDirectory() as directory,
+        ):
+            output = Path(directory) / "missing-cjk-font.pdf"
+
+            with self.assertRaisesRegex(RuntimeError, "font_path|JIANPU_CJK_FONT"):
+                render_jianpu_pdf(score, output, notation="fixed")
+
+            self.assertFalse(output.exists())
+
+    def test_canvas_places_numbered_lyrics_on_distinct_verse_rows(self):
+        score = score_from_sequence(
+            [
+                [
+                    (
+                        Fraction(4),
+                        "note",
+                        (Pitch("C", 0, 4),),
+                        (),
+                        (
+                            Lyric("first", number="1"),
+                            Lyric("second", number="2"),
+                        ),
+                    ),
+                ]
+            ]
+        )
+
+        canvas = render_with_canvas_spy(score, strip_lyrics=False)
+        verse_rows = {
+            text: y
+            for font, _x, y, text in canvas.string_calls
+            if font == ("Helvetica", 8) and text in {"first", "second"}
+        }
+
+        self.assertEqual({"first", "second"}, set(verse_rows))
+        self.assertNotEqual(verse_rows["first"], verse_rows["second"])
+
+    def test_rejects_cross_barline_ties_before_creating_output(self):
+        c4 = Pitch("C", 0, 4)
+        score = score_from_sequence(
+            [
+                [(Fraction(1), "note", (c4,), ("start",), ())],
+                [(Fraction(1), "note", (c4,), ("stop",), ())],
+            ],
+            duration=(Fraction(1), Fraction(1)),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "cross-bar-tie.pdf"
+
+            with self.assertRaisesRegex(ValueError, "ties crossing a barline"):
+                render_jianpu_pdf(score, output, notation="fixed")
+
+            self.assertFalse(output.exists())
+
+    def test_cjk_lyrics_use_the_explicit_font_and_remain_extractable(self):
+        font_path = Path("/usr/share/fonts/truetype/wqy/wqy-zenhei.ttc")
+        if not font_path.is_file():
+            self.skipTest("no local CJK TrueType font is available")
+        score = score_from_sequence(
+            [
+                [
+                    (Fraction(4), "note", (Pitch("C", 0, 4),), (), (Lyric("春天"),)),
+                ]
+            ]
+        )
+        configurations = (
+            ({"font_path": font_path}, ""),
+            ({}, str(font_path)),
+        )
+        for options, environment_font in configurations:
+            with self.subTest(configured_by="font_path" if options else "environment"):
+                with (
+                    patch.dict("os.environ", {"JIANPU_CJK_FONT": environment_font}),
+                    tempfile.TemporaryDirectory() as directory,
+                ):
+                    output = Path(directory) / "cjk-lyrics.pdf"
+                    render_jianpu_pdf(score, output, notation="fixed", **options)
+                    text = PdfReader(str(output)).pages[0].extract_text()
+
+                self.assertIn("春天", text)
+
+    def test_rejects_durations_that_cannot_be_faithfully_notated(self):
+        score = load_musicxml(self.fixture("g-major-two-bars.musicxml"))
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "unsupported-tuplet.pdf"
+
+            with self.assertRaisesRegex(ValueError, "cannot be represented faithfully"):
+                render_jianpu_pdf(score, output, notation="fixed")
+
+            self.assertFalse(output.exists())
+
+    def test_zero_duration_grace_event_fails_without_inventing_a_sentinel(self):
+        measure = MeasureContext(0, "1", Fraction(4), 0, "major", 4, 4)
+        part = ScorePart("P1", "Grace")
+        part.events = [
+            ScoreEvent(
+                "P1",
+                0,
+                "1",
+                Fraction(0),
+                Fraction(0),
+                "note",
+                pitches=(Pitch("C", 0, 4),),
+                sounding_pitches=(Pitch("C", 0, 4),),
+                grace=True,
+            ),
+            ScoreEvent("P1", 0, "1", Fraction(0), Fraction(4), "rest"),
+        ]
+        score = ScoreModel("Grace", [part], [measure])
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "grace.pdf"
+
+            with self.assertRaisesRegex(ValueError, "grace events are zero-duration"):
+                render_jianpu_pdf(score, output, notation="fixed")
+
+            self.assertFalse(output.exists())
 
 
 if __name__ == "__main__":
