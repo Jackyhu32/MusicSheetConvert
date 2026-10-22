@@ -18,7 +18,6 @@ import logging
 import sys
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 from .music_convert import core
 from .music_convert.advanced import (
@@ -30,10 +29,10 @@ from .music_convert.advanced import (
     build_key_demonstration,
     write_score,
 )
+from .music_convert.musicxml_io import load_musicxml, merge_page_models
 from .ocr import AudiverisConfig, image_to_musicxml, is_audiveris_available
 from .preprocess import pdf_to_images, preprocess_image
 from .render import (
-    find_musescore,
     musicxml_to_jianpu_text_file,
     musicxml_to_png,
 )
@@ -50,10 +49,10 @@ class PipelineResult:
     """Result of a single pipeline run."""
 
     image: Path
-    musicxml: Optional[Path] = None
-    midi: Optional[Path] = None
-    jianpu_txt: Optional[Path] = None
-    rendered_png: Optional[Path] = None
+    musicxml: Path | None = None
+    midi: Path | None = None
+    jianpu_txt: Path | None = None
+    rendered_png: Path | None = None
 
 
 def run_pipeline(
@@ -64,7 +63,7 @@ def run_pipeline(
     skip_ocr: bool = False,
     audiveris_cfg: AudiverisConfig | None = None,
 ) -> list[PipelineResult]:
-    """Run the end-to-end pipeline. One ``PipelineResult`` is produced per page/image.
+    """Run the end-to-end pipeline. One ``PipelineResult`` is produced for the input document.
 
     Args:
         input_path: input file (PDF / PNG / JPG).
@@ -97,49 +96,57 @@ def run_pipeline(
     else:
         raise ValueError(f"Unsupported input format: {suffix}")
 
-    results: list[PipelineResult] = []
-    for img in image_paths:
-        result = PipelineResult(image=img)
+    if skip_ocr:
+        musicxml_path = image_paths[0]
+        result_image = input_path
+    else:
+        if not is_audiveris_available(audiveris_cfg):
+            raise RuntimeError(
+                "Audiveris not detected. Install it and put it on PATH, "
+                "or pass a MusicXML file directly (--skip-ocr)."
+            )
 
-        # 1. OCR -> MusicXML
-        if skip_ocr:
-            result.musicxml = img
-        else:
-            if not is_audiveris_available(audiveris_cfg):
-                raise RuntimeError(
-                    "Audiveris not detected. Install it and put it on PATH, "
-                    "or pass a MusicXML file directly (--skip-ocr)."
-                )
-            mxl_out_dir = out_dir / "musicxml"
-            log.info("Audiveris recognition: %s", img)
-            result.musicxml = image_to_musicxml(img, mxl_out_dir, audiveris_cfg)
+        page_models = []
+        pages_output_dir = out_dir / "musicxml" / "pages"
+        for page_number, image in enumerate(image_paths, start=1):
+            page_output_dir = pages_output_dir / f"page-{page_number:04d}"
+            log.info("Audiveris recognition: %s", image)
+            page_musicxml = image_to_musicxml(
+                image, page_output_dir, audiveris_cfg
+            )
+            page_models.append(load_musicxml(page_musicxml))
 
-        # 2. MusicXML -> MIDI
-        midi_out = out_dir / "midi" / f"{result.musicxml.stem}.mid"
-        log.info("MusicXML -> MIDI: %s -> %s", result.musicxml, midi_out)
-        core.musicxml_to_midi(result.musicxml, midi_out,
-                              core.ConvertOptions(bpm=bpm))
-        result.midi = midi_out
+        merged_model = merge_page_models(page_models)
+        if merged_model.source_musicxml is None:
+            raise ValueError("merged score did not produce editable MusicXML")
+        musicxml_path = out_dir / "musicxml" / "merged.musicxml"
+        musicxml_path.parent.mkdir(parents=True, exist_ok=True)
+        musicxml_path.write_bytes(merged_model.source_musicxml)
+        result_image = input_path if suffix == ".pdf" else image_paths[0]
 
-        # 3. MusicXML -> jianpu text
-        jianpu_out = out_dir / "jianpu" / f"{result.musicxml.stem}.txt"
-        log.info("MusicXML -> jianpu text: %s", jianpu_out)
-        musicxml_to_jianpu_text_file(result.musicxml, jianpu_out)
-        result.jianpu_txt = jianpu_out
+    result = PipelineResult(image=result_image, musicxml=musicxml_path)
 
-        # 4. (Optional) Render staff-notation PNG.
-        if render_png:
-            png_out = out_dir / "rendered" / f"{result.musicxml.stem}.png"
-            log.info("MusicXML -> staff PNG: %s", png_out)
-            try:
-                musicxml_to_png(result.musicxml, png_out)
-                result.rendered_png = png_out
-            except RuntimeError as e:
-                log.warning("MuseScore unavailable, skipping render: %s", e)
+    # Convert the complete source document once after all OMR pages validate.
+    midi_out = out_dir / "midi" / f"{musicxml_path.stem}.mid"
+    log.info("MusicXML -> MIDI: %s -> %s", musicxml_path, midi_out)
+    core.musicxml_to_midi(musicxml_path, midi_out, core.ConvertOptions(bpm=bpm))
+    result.midi = midi_out
 
-        results.append(result)
+    jianpu_out = out_dir / "jianpu" / f"{musicxml_path.stem}.txt"
+    log.info("MusicXML -> jianpu text: %s", jianpu_out)
+    musicxml_to_jianpu_text_file(musicxml_path, jianpu_out)
+    result.jianpu_txt = jianpu_out
 
-    return results
+    if render_png:
+        png_out = out_dir / "rendered" / f"{musicxml_path.stem}.png"
+        log.info("MusicXML -> staff PNG: %s", png_out)
+        try:
+            musicxml_to_png(musicxml_path, png_out)
+            result.rendered_png = png_out
+        except RuntimeError as error:
+            log.warning("MuseScore unavailable, skipping render: %s", error)
+
+    return [result]
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -170,7 +177,7 @@ def build_parser() -> argparse.ArgumentParser:
     return p
 
 
-def run_demo(demo: str, key_name: str, title: Optional[str],
+def run_demo(demo: str, key_name: str, title: str | None,
              out_dir: Path, bpm: int, render: bool) -> PipelineResult:
     """Generate a preset complex score and emit the full output bundle (MusicXML / MIDI / jianpu / PNG)."""
     out_dir.mkdir(parents=True, exist_ok=True)
