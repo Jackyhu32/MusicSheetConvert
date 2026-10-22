@@ -233,7 +233,7 @@ class MusicXmlParsingTests(unittest.TestCase):
         self.assertEqual((Fraction(5, 2), Fraction(1, 2)), (rest.onset, rest.duration))
         self.assertEqual((0, Fraction(3)), (tied_start.measure_index, tied_start.onset))
         self.assertEqual((1, Fraction(0)), (tied_stop.measure_index, tied_stop.onset))
-        self.assertTrue(all(event.voice_id == "1" for event in soprano))
+        self.assertEqual({"1", "2"}, {event.voice_id for event in soprano})
         self.assertEqual(
             ("星", "2", "begin", True),
             (lyric.text, lyric.number, lyric.syllabic, lyric.extend),
@@ -288,10 +288,84 @@ class MusicXmlParsingTests(unittest.TestCase):
             [Pitch("G", 0, 4), Pitch("A", 0, 4), Pitch("B", 0, 4), Pitch("C", 0, 5)],
             [event.pitches[0] for event in soprano.events[:4]],
         )
+        self.assertEqual(
+            [(Fraction(index), Fraction(1)) for index in range(4)],
+            [(event.onset, event.duration) for event in soprano.events[:4]],
+        )
         self.assertEqual(1, model.measures[0].fifths)
         self.assertEqual("major", model.measures[0].mode)
         self.assertEqual((4, 4), (model.measures[0].beats, model.measures[0].beat_type))
-        self.assertTrue(all(event.sounding_pitches for event in soprano.events))
+        self.assertTrue(
+            all(
+                event.sounding_pitches
+                for event in soprano.events
+                if event.kind != "rest"
+            )
+        )
+
+    def test_clef_changes_keep_measure_and_staff_identity(self):
+        from src.music_convert.musicxml_io import load_musicxml
+
+        model = load_musicxml(self.fixture("satbb-two-measures.musicxml"))
+        clefs = [
+            direction for direction in model.directions if direction.kind == "clef"
+        ]
+
+        self.assertEqual(
+            [(0, "P-S", "1", "G:2:0"), (1, "P-S", "1", "F:4:0")],
+            [
+                (
+                    direction.measure_index,
+                    direction.part_id,
+                    direction.staff_number,
+                    direction.value,
+                )
+                for direction in clefs
+                if direction.part_id == "P-S" and direction.staff_number == "1"
+            ],
+        )
+
+    def test_backup_preserves_overlapping_events_in_distinct_voices(self):
+        from src.music_convert.musicxml_io import load_musicxml
+
+        model = load_musicxml(self.fixture("satbb-two-measures.musicxml"))
+        soprano = model.parts[0].events
+        at_downbeat = [
+            event
+            for event in soprano
+            if event.measure_index == 0 and event.onset == Fraction(0)
+        ]
+
+        self.assertEqual({"1", "2"}, {event.voice_id for event in at_downbeat})
+        voice_two = next(event for event in at_downbeat if event.voice_id == "2")
+        self.assertEqual("note", voice_two.kind)
+        self.assertEqual((Pitch("G", 0, 3),), voice_two.pitches)
+        self.assertEqual(Fraction(1), voice_two.duration)
+        self.assertTrue(
+            any(event.voice_id == "2" and event.kind == "rest" for event in soprano)
+        )
+
+    def test_g_major_second_measure_parses_exact_triplet_timeline(self):
+        from src.music_convert.musicxml_io import load_musicxml
+
+        model = load_musicxml(self.fixture("g-major-two-bars.musicxml"))
+        soprano = model.parts[0]
+        second_measure = [event for event in soprano.events if event.measure_index == 1]
+
+        self.assertEqual(2, len(model.measures))
+        self.assertEqual(
+            [
+                ("note", Fraction(0), Fraction(1, 3)),
+                ("note", Fraction(1, 3), Fraction(1, 3)),
+                ("note", Fraction(2, 3), Fraction(1, 3)),
+                ("rest", Fraction(1), Fraction(3)),
+            ],
+            [(event.kind, event.onset, event.duration) for event in second_measure],
+        )
+        self.assertEqual(
+            [Pitch("D", 0, 5), Pitch("E", 0, 5), Pitch("F", 1, 5)],
+            [event.pitches[0] for event in second_measure[:3]],
+        )
 
     def test_mxl_archive_is_parsed_directly_and_retained_verbatim(self):
         from pathlib import Path

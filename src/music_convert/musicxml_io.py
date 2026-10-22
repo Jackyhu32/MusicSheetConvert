@@ -173,6 +173,7 @@ def _source_details(source: bytes | None) -> dict[str, Any] | None:
         "events": {},
         "staves": {},
         "pickups": {},
+        "clefs": {},
         "titles": [],
     }
     for element in root.iter():
@@ -195,6 +196,7 @@ def _source_details(source: bytes | None) -> dict[str, Any] | None:
                 "true",
                 "1",
             }
+            details["clefs"][key] = []
             cursor = Fraction(0)
             last_event: dict[str, Any] | None = None
             for element in measure_element:
@@ -208,11 +210,19 @@ def _source_details(source: bytes | None) -> dict[str, Any] | None:
                         sign = _text(_child(clef_element, "sign"))
                         line = _text(_child(clef_element, "line"))
                         octave = _text(_child(clef_element, "clef-octave-change"), "0")
-                        staff_contexts[staff_number] = StaffContext(
-                            number=staff_number,
-                            clef_sign=sign,
-                            clef_line=int(line) if line else None,
-                            clef_octave_change=int(octave or 0),
+                        clef_line = int(line) if line else None
+                        octave_change = int(octave or 0)
+                        staff_contexts.setdefault(
+                            staff_number,
+                            StaffContext(
+                                number=staff_number,
+                                clef_sign=sign,
+                                clef_line=clef_line,
+                                clef_octave_change=octave_change,
+                            ),
+                        )
+                        details["clefs"][key].append(
+                            (cursor, staff_number, sign, clef_line, octave_change)
                         )
                 elif tag in {"backup", "forward"}:
                     amount = _text(_child(element, "duration"), "0") or "0"
@@ -464,6 +474,54 @@ def _measure_contexts(
     return result
 
 
+def _clef_directions(
+    parts: list[stream.Part], details: dict[str, Any] | None
+) -> list[ScoreDirection]:
+    directions: list[ScoreDirection] = []
+    for part_index, part in enumerate(parts):
+        part_id = (
+            details["part_info"][part_index][0]
+            if details and part_index < len(details["part_info"])
+            else str(part.id)
+        )
+        measures = list(part.getElementsByClass(stream.Measure))
+        for measure_index, measure in enumerate(measures):
+            source_clefs = (
+                details["clefs"].get((part_index, measure_index), []) if details else []
+            )
+            if source_clefs:
+                changes = source_clefs
+            elif details is None:
+                changes = [
+                    (
+                        _fraction(item.getOffsetInHierarchy(measure)),
+                        str(getattr(item, "number", None) or "1"),
+                        getattr(item, "sign", None),
+                        getattr(item, "line", None),
+                        int(getattr(item, "octaveChange", 0) or 0),
+                    )
+                    for item in measure.recurse().getElementsByClass(clef.Clef)
+                ]
+            else:
+                changes = []
+            for onset, staff_number, sign, line, octave_change in changes:
+                if sign is None:
+                    continue
+                line_value = "" if line is None else str(line)
+                value = f"{sign}:{line_value}:{octave_change}"
+                directions.append(
+                    ScoreDirection(
+                        measure_index=measure_index,
+                        onset=onset,
+                        kind="clef",
+                        value=value,
+                        part_id=part_id,
+                        staff_number=staff_number,
+                    )
+                )
+    return directions
+
+
 def _score_title(score: stream.Score, details: dict[str, Any] | None) -> str:
     metadata = getattr(score, "metadata", None)
     title = getattr(metadata, "title", None) if metadata is not None else None
@@ -622,6 +680,7 @@ def score_to_model(
                         )
                     )
     directions, tempo_bpm = _score_directions(music_parts)
+    directions.extend(_clef_directions(music_parts, details))
     return ScoreModel(
         title=_score_title(score, details),
         parts=parts,

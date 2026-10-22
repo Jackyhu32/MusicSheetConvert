@@ -48,6 +48,8 @@ class ScoreDirection:
     onset: Fraction
     kind: str
     value: str
+    part_id: str | None = None
+    staff_number: str | None = None
 
 
 @dataclass(frozen=True)
