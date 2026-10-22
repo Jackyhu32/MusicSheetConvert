@@ -145,11 +145,8 @@ def _run_pipeline_in_directory(
     if render_png:
         png_out = out_dir / "rendered" / f"{musicxml_path.stem}.png"
         log.info("MusicXML -> staff PNG: %s", png_out)
-        try:
-            musicxml_to_png(musicxml_path, png_out)
-            result.rendered_png = png_out
-        except RuntimeError as error:
-            log.warning("MuseScore unavailable, skipping render: %s", error)
+        musicxml_to_png(musicxml_path, png_out)
+        result.rendered_png = png_out
 
     return [result]
 

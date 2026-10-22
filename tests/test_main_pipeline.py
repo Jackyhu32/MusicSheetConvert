@@ -19,6 +19,7 @@ class MainPipelinePageMergeTests(unittest.TestCase):
         root=None,
         document_name="two-pages.pdf",
         fail_midi=False,
+        fail_render=False,
     ):
         temporary_directory = None
         if root is None:
@@ -74,6 +75,13 @@ class MainPipelinePageMergeTests(unittest.TestCase):
         jianpu = stack.enter_context(
             patch("src.main.musicxml_to_jianpu_text_file", side_effect=make_jianpu)
         )
+        if fail_render:
+            stack.enter_context(
+                patch(
+                    "src.main.musicxml_to_png",
+                    side_effect=RuntimeError("mock render failure"),
+                )
+            )
         if expect_failure:
             with self.assertRaises(ValueError):
                 run_pipeline(pdf, out_dir)
@@ -81,6 +89,10 @@ class MainPipelinePageMergeTests(unittest.TestCase):
         elif fail_midi:
             with self.assertRaisesRegex(RuntimeError, "mock conversion failure"):
                 run_pipeline(pdf, out_dir)
+            results = []
+        elif fail_render:
+            with self.assertRaisesRegex(RuntimeError, "mock render failure"):
+                run_pipeline(pdf, out_dir, render_png=True)
             results = []
         else:
             results = run_pipeline(pdf, out_dir)
@@ -178,6 +190,45 @@ class MainPipelinePageMergeTests(unittest.TestCase):
                 root=root,
                 document_name="repeated.pdf",
                 fail_midi=True,
+            )
+
+            self.assertEqual(
+                published_before,
+                {path for path in output_root.iterdir() if path.is_dir()},
+            )
+            self.assertEqual([], list(output_root.glob(".staging-*")))
+            self.assertEqual(
+                previous_content,
+                {
+                    path.relative_to(previous_root): path.read_bytes()
+                    for path in previous_root.rglob("*")
+                    if path.is_file()
+                },
+            )
+
+    def test_render_failure_publishes_nothing_and_preserves_previous_run(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            successful, _, _, _, output_root = self.run_pdf_pipeline(
+                ("omr-page-1.musicxml", "omr-page-2.musicxml"),
+                root=root,
+                document_name="rendered.pdf",
+            )
+            previous_root = self.run_root(successful[0])
+            previous_content = {
+                path.relative_to(previous_root): path.read_bytes()
+                for path in previous_root.rglob("*")
+                if path.is_file()
+            }
+            published_before = {
+                path for path in output_root.iterdir() if path.is_dir()
+            }
+
+            self.run_pdf_pipeline(
+                ("omr-page-2.musicxml", "omr-page-1.musicxml"),
+                root=root,
+                document_name="rendered.pdf",
+                fail_render=True,
             )
 
             self.assertEqual(
