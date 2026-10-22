@@ -6,6 +6,7 @@ from fractions import Fraction
 from pathlib import Path
 
 from reportlab.lib.pagesizes import A4, landscape
+from reportlab.pdfbase.pdfmetrics import stringWidth
 from reportlab.pdfgen.canvas import Canvas
 
 from src.music_convert.jianpu import map_pitch
@@ -147,37 +148,74 @@ def render_jianpu_pdf(
         for lane_keys in part_lane_keys
     ]
     available_height = page_height - 86.0 - 36.0
-    part_groups: list[list[int]] = []
-    current_group: list[int] = []
-    current_height = 0.0
-    for part_index, row_height in enumerate(row_heights):
-        if row_height > available_height:
-            raise ValueError(
-                f"part {score.parts[part_index].name!r} lane layout cannot fit "
-                "on a landscape page"
-            )
-        if current_group and current_height + row_height > available_height:
-            part_groups.append(current_group)
-            current_group = []
-            current_height = 0.0
-        current_group.append(part_index)
-        current_height += row_height
-    if current_group:
-        part_groups.append(current_group)
-    if not part_groups:
-        part_groups = [[]]
+    ensemble_height = sum(row_heights)
+    if ensemble_height > available_height:
+        raise ValueError(
+            "ensemble lane layout cannot fit on a landscape page; "
+            "reduce the number of parts or lanes"
+        )
 
-    pages = [
-        (measure_group, part_group)
-        for measure_group in measure_groups
-        for part_group in part_groups
-    ]
+    def require_text_fits(text: str, font_name: str, font_size: float, width: float):
+        if stringWidth(text, font_name, font_size) > width:
+            raise ValueError(
+                f"text {text!r} cannot fit within its horizontal bounds"
+            )
+
+    require_text_fits(
+        document_title,
+        "Helvetica-Bold",
+        18,
+        system_right - 36.0,
+    )
+    for part in score.parts:
+        require_text_fits(
+            part.name,
+            "Helvetica-Bold",
+            11,
+            system_x - 36.0 - 12.0,
+        )
+
+    for measure_group in measure_groups:
+        measure_width = available_width / len(measure_group) if measure_group else 0.0
+        measure_layout = {
+            measure.index: (position, measure)
+            for position, measure in enumerate(measure_group)
+        }
+        for position, measure in enumerate(measure_group):
+            measure_x = system_x + position * measure_width
+            require_text_fits(
+                measure.number,
+                "Helvetica",
+                9,
+                measure_x + measure_width - measure_x,
+            )
+        for part in score.parts:
+            for event in part.events:
+                layout = measure_layout.get(event.measure_index)
+                if layout is None:
+                    continue
+                position, measure = layout
+                measure_x = system_x + position * measure_width
+                x = event_x(event.onset, measure.duration, measure_x, measure_width)
+                token = _event_token(
+                    event,
+                    notation=notation,
+                    context=contexts.get(event.measure_index),
+                )
+                require_text_fits(
+                    token,
+                    "Helvetica",
+                    11,
+                    system_right - x,
+                )
+
+    pages = measure_groups
     output = Path(output_path)
     output.parent.mkdir(parents=True, exist_ok=True)
     pdf = Canvas(str(output), pagesize=(page_width, page_height))
     pdf.setTitle(document_title)
 
-    for page_index, (page_measures, page_parts) in enumerate(pages):
+    for page_index, page_measures in enumerate(pages):
         pdf.setFont("Helvetica-Bold", 18)
         pdf.drawCentredString(page_width / 2, page_height - 42, document_title)
 
@@ -186,16 +224,17 @@ def render_jianpu_pdf(
             measure.index: (position, measure)
             for position, measure in enumerate(page_measures)
         }
+        page_parts = range(len(score.parts))
         row_y = {}
         current_y = page_height - 86
         for part_index in page_parts:
             row_y[part_index] = current_y
             current_y -= row_heights[part_index]
 
-        if page_measures and page_parts:
-            last_part_index = page_parts[-1]
+        if page_measures and score.parts:
+            last_part_index = len(score.parts) - 1
             last_lane_count = max(1, len(part_lane_keys[last_part_index]))
-            system_top = row_y[page_parts[0]] + 18
+            system_top = row_y[0] + 18
             system_bottom = (
                 row_y[last_part_index] - (last_lane_count - 1) * lane_spacing - 18
             )

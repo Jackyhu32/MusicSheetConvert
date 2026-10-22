@@ -8,9 +8,16 @@ from unittest.mock import patch
 
 from pypdf import PdfReader
 from reportlab.lib.pagesizes import A4, landscape
+from reportlab.pdfbase.pdfmetrics import stringWidth
 
 from src.music_convert.jianpu import map_pitch
-from src.music_convert.model import MeasureContext, ScoreEvent, ScoreModel, ScorePart
+from src.music_convert.model import (
+    MeasureContext,
+    Pitch,
+    ScoreEvent,
+    ScoreModel,
+    ScorePart,
+)
 from src.music_convert.musicxml_io import load_musicxml
 from src.render.jianpu_pdf import event_x, render_jianpu_pdf
 
@@ -93,6 +100,26 @@ def dense_score(part_count=6, lane_count=8, measure_count=10):
         ]
         parts.append(part)
     return ScoreModel("Dense Layout", parts, measures)
+
+
+def late_long_chord_score(pitch_count=80):
+    measure = MeasureContext(0, "1", Fraction(4), 0, "major", 4, 4)
+    part = ScorePart("P1", "Chord Part")
+    pitches = (Pitch("C", 0, 4),) * pitch_count
+    part.events = [
+        ScoreEvent("P1", 0, "1", Fraction(0), Fraction(3), "rest"),
+        ScoreEvent(
+            "P1",
+            0,
+            "1",
+            Fraction(3),
+            Fraction(1),
+            "chord",
+            pitches=pitches,
+            sounding_pitches=pitches,
+        ),
+    ]
+    return ScoreModel("Chord Bounds", [part], [measure])
 
 
 class JianpuLayoutTests(unittest.TestCase):
@@ -393,7 +420,7 @@ class JianpuPdfTests(unittest.TestCase):
             self.assertFalse(output.exists())
 
     def test_dense_score_paginates_with_all_draw_coordinates_inside_page(self):
-        score = dense_score()
+        score = dense_score(part_count=5, lane_count=3, measure_count=10)
         source_part_names = [part.name for part in score.parts]
         source_events = [tuple(part.events) for part in score.parts]
         source_measure_numbers = [measure.number for measure in score.measures]
@@ -408,6 +435,14 @@ class JianpuPdfTests(unittest.TestCase):
             self.assertLessEqual(x, page_width)
             self.assertGreaterEqual(y, 0)
             self.assertLessEqual(y, page_height)
+        for (font_name, font_size), x, _y, text in canvas.string_calls:
+            text_width = stringWidth(text, font_name, font_size)
+            if font_size == 18:
+                self.assertGreaterEqual(x - text_width / 2, 0)
+                self.assertLessEqual(x + text_width / 2, page_width)
+            else:
+                self.assertGreaterEqual(x, 0)
+                self.assertLessEqual(x + text_width, page_width)
 
         rendered_labels = [
             text
@@ -438,8 +473,10 @@ class JianpuPdfTests(unittest.TestCase):
 
         self.assertGreater(len(pages), 1)
         extracted_text = "\n".join(page.extract_text() or "" for page in pages)
-        for part_name in source_part_names:
-            self.assertIn(part_name, extracted_text)
+        for page in pages:
+            page_text = page.extract_text() or ""
+            for part_name in source_part_names:
+                self.assertIn(part_name, page_text)
         for measure_number in source_measure_numbers:
             self.assertIn(measure_number, extracted_text)
 
@@ -452,6 +489,48 @@ class JianpuPdfTests(unittest.TestCase):
                 render_jianpu_pdf(score, output, notation="fixed")
 
             self.assertFalse(output.exists())
+
+
+    def test_rejects_ensemble_whose_complete_lane_rows_cannot_fit(self):
+        score = dense_score(part_count=6, lane_count=8, measure_count=1)
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "ensemble-too-tall.pdf"
+
+            with self.assertRaisesRegex(ValueError, "ensemble.*cannot fit"):
+                render_jianpu_pdf(score, output, notation="fixed")
+
+            self.assertFalse(output.exists())
+
+    def test_rejects_late_long_chord_that_would_overflow_page_width(self):
+        score = late_long_chord_score()
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "wide-chord.pdf"
+
+            with self.assertRaisesRegex(ValueError, "text.*fit.*horizontal"):
+                render_jianpu_pdf(score, output, notation="fixed")
+
+            self.assertFalse(output.exists())
+
+    def test_rejects_title_or_part_label_that_exceeds_its_horizontal_region(self):
+        score = dense_score(part_count=1, lane_count=1, measure_count=1)
+        cases = (
+            {"title": "A" * 200},
+            {"part_name": "A" * 200},
+        )
+        for options in cases:
+            with self.subTest(options=tuple(options)):
+                if "part_name" in options:
+                    score.parts[0].name = options["part_name"]
+                    render_options = {}
+                else:
+                    render_options = options
+                with tempfile.TemporaryDirectory() as directory:
+                    output = Path(directory) / "wide-label.pdf"
+                    with self.assertRaisesRegex(ValueError, "text.*fit.*horizontal"):
+                        render_jianpu_pdf(
+                            score, output, notation="fixed", **render_options
+                        )
+                    self.assertFalse(output.exists())
 
 
 if __name__ == "__main__":
