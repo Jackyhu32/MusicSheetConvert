@@ -70,6 +70,13 @@ class ScoreEvent:
         """Return pitches as notated, preserving the legacy ``pitches`` field."""
         return self.pitches
 
+    @property
+    def effective_sounding_pitches(self) -> tuple[Pitch, ...]:
+        """Return sounding pitches, defaulting to written pitches when unison."""
+        if self.kind == "rest":
+            return ()
+        return self.sounding_pitches or self.pitches
+
 
 @dataclass(frozen=True)
 class MeasureContext:

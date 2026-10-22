@@ -82,7 +82,32 @@ class ScoreModelTests(unittest.TestCase):
         self.assertEqual((written_pitch,), event.written_pitches)
         self.assertEqual((written_pitch,), event.pitches)
         self.assertEqual((sounding_pitch,), event.sounding_pitches)
+        self.assertEqual((sounding_pitch,), event.effective_sounding_pitches)
         self.assertNotEqual(event.written_pitches, event.sounding_pitches)
+
+    def test_effective_sounding_pitches_fall_back_to_written_pitches_or_empty_for_rest(self):
+        written_pitch = Pitch("G", 0, 4)
+        note = ScoreEvent(
+            part_id="S",
+            measure_index=0,
+            voice_id="1",
+            onset=Fraction(0),
+            duration=Fraction(1),
+            kind="note",
+            pitches=(written_pitch,),
+        )
+        rest = ScoreEvent(
+            part_id="S",
+            measure_index=0,
+            voice_id="1",
+            onset=Fraction(1),
+            duration=Fraction(1),
+            kind="rest",
+            pitches=(written_pitch,),
+        )
+
+        self.assertEqual((written_pitch,), note.effective_sounding_pitches)
+        self.assertEqual((), rest.effective_sounding_pitches)
 
     def test_timing_contexts_and_model_constructors_keep_exact_values(self):
         direction = ScoreDirection(0, Fraction(1, 3), "dynamic", "p")
