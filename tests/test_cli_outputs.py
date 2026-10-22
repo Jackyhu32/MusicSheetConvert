@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from src.main import build_parser, main, run_pipeline
 from src.music_convert.musicxml_io import load_musicxml
+from src.music_convert.validation import validate_score
 
 ROOT = Path(__file__).parent
 FIXTURES = ROOT / "fixtures"
@@ -200,6 +201,182 @@ class CliOutputContractTests(unittest.TestCase):
             self.assertEqual(1, len(rendered))
             self.assertEqual("fixed", rendered[0][1])
             self.assertEqual("D", rendered[0][2])
+
+    def test_grand_staff_demo_keeps_default_movable_tonic_unspecified(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            rendered = []
+
+            def write_pdf(model, path, *, notation, tonic):
+                rendered.append((notation, tonic))
+                return _write_output(path)
+
+            with patch("src.main.render_jianpu_pdf", side_effect=write_pdf):
+                self.assertEqual(
+                    0,
+                    main(
+                        [
+                            "--demo",
+                            "grand_staff",
+                            "--out",
+                            str(output),
+                            "--formats",
+                            "pdf",
+                        ]
+                    ),
+                )
+
+            self.assertEqual([("movable", None)], rendered)
+            files = [path.name for path in output.rglob("*") if path.is_file()]
+            self.assertEqual(["grand_staff_c.pdf"], files)
+
+    def test_grand_staff_demo_preserves_explicit_tonic_with_selected_pdf(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            rendered = []
+
+            def write_pdf(model, path, *, notation, tonic):
+                rendered.append((notation, tonic))
+                return _write_output(path)
+
+            with patch("src.main.render_jianpu_pdf", side_effect=write_pdf):
+                self.assertEqual(
+                    0,
+                    main(
+                        [
+                            "--demo",
+                            "grand_staff",
+                            "--out",
+                            str(output),
+                            "--formats",
+                            "pdf",
+                            "--tonic",
+                            "D",
+                        ]
+                    ),
+                )
+
+            self.assertEqual([("movable", "D")], rendered)
+            self.assertEqual(
+                ["grand_staff_c.pdf"],
+                [path.name for path in output.rglob("*") if path.is_file()],
+            )
+
+    def test_bach_prelude_pdf_demo_has_valid_four_four_measures_only(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            observed = []
+
+            def write_pdf(model, path, *, notation, tonic):
+                observed.append((model, notation, tonic))
+                return _write_output(path)
+
+            with patch("src.main.render_jianpu_pdf", side_effect=write_pdf):
+                self.assertEqual(
+                    0,
+                    main(
+                        [
+                            "--demo",
+                            "bach_prelude",
+                            "--out",
+                            str(output),
+                            "--formats",
+                            "pdf",
+                            "--mode",
+                            "fixed",
+                        ]
+                    ),
+                )
+
+            self.assertEqual(1, len(observed))
+            model, notation, _tonic = observed[0]
+            self.assertEqual("fixed", notation)
+            self.assertEqual([], validate_score(model))
+            self.assertEqual(4, len(model.measures))
+            left_hand = next(part for part in model.parts if "LH" in part.name)
+            for measure_index in range(4):
+                events = [
+                    event
+                    for event in left_hand.events
+                    if event.measure_index == measure_index
+                ]
+                self.assertEqual([2, 2], [event.duration for event in events])
+            self.assertEqual(
+                ["bach_prelude_m1_m4.pdf"],
+                [path.name for path in output.rglob("*") if path.is_file()],
+            )
+
+    def test_unresolved_omr_boundary_publishes_review_only_report(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "unresolved.pdf"
+            source.touch()
+            page_images = [root / "page-1.png", root / "page-2.png"]
+            for image in page_images:
+                image.touch()
+
+            def recognize(image, output_directory, _config):
+                page_index = page_images.index(image)
+                fixture_name = (
+                    "omr-page-1.musicxml" if page_index == 0 else "omr-page-2.musicxml"
+                )
+                return _write_output(
+                    Path(output_directory) / fixture_name,
+                    (FIXTURES / fixture_name).read_bytes(),
+                )
+
+            with (
+                patch("src.main.pdf_to_images", return_value=page_images),
+                patch(
+                    "src.main.preprocess_image", side_effect=lambda path, _dest: path
+                ),
+                patch("src.main.is_audiveris_available", return_value=True),
+                patch("src.main.image_to_musicxml", side_effect=recognize),
+                patch("src.main.core.score_model_to_midi") as midi,
+                patch("src.main.score_model_to_jianpu_text_file") as text,
+                patch("src.main.render_jianpu_pdf") as pdf,
+            ):
+                results = run_pipeline(source, root / "output")
+
+            self.assertEqual(1, len(results))
+            result = results[0]
+            self.assertTrue(result.requires_review)
+            self.assertEqual("review_only", result.publication_state)
+            self.assertIsNone(result.musicxml)
+            self.assertIsNone(result.midi)
+            self.assertIsNone(result.jianpu_txt)
+            self.assertIsNone(result.jianpu_pdf)
+            midi.assert_not_called()
+            text.assert_not_called()
+            pdf.assert_not_called()
+            self.assertTrue(result.review_report.is_file())
+            report = json.loads(result.review_report.read_text(encoding="utf-8"))
+            self.assertEqual("review_only", report["publication_state"])
+            codes = {issue["code"] for issue in report["validation_issues"]}
+            self.assertIn("tie_discontinuity", codes)
+            self.assertIn("review_required", codes)
+            self.assertIn("page_boundary_tie_unresolved", codes)
+            located = [
+                issue
+                for issue in report["validation_issues"]
+                if issue["code"] == "page_boundary_tie_unresolved"
+            ]
+            self.assertTrue(located)
+            self.assertTrue(
+                any(
+                    issue["location"]["page"] == 1
+                    and issue["location"]["measure_number"] == "8"
+                    for issue in located
+                )
+            )
+            self.assertEqual(
+                {"review.json"},
+                {
+                    path.name
+                    for path in result.review_report.parent.rglob("*")
+                    if path.is_file()
+                },
+            )
 
     def test_two_page_omr_is_merged_once_and_always_requires_review(self):
         with tempfile.TemporaryDirectory() as directory:

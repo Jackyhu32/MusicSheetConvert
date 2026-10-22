@@ -51,6 +51,7 @@ def main() -> int:
             assert r.midi and r.midi.exists() and r.midi.stat().st_size > 0
             assert r.jianpu_txt and r.jianpu_txt.exists()
             assert r.jianpu_pdf and r.jianpu_pdf.exists()
+            assert r.publication_state == "complete"
             print(r.jianpu_txt.read_text(encoding="utf-8"))
     print("E2E OK")
     return 0

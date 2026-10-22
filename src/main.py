@@ -97,6 +97,102 @@ class PipelineResult:
     jianpu_pdf: Path | None = None
     review_report: Path | None = None
     requires_review: bool = False
+    publication_state: str = "complete"
+
+
+def _write_review_report(
+    out_dir: Path,
+    input_path: Path,
+    page_count: int,
+    model,
+    issues,
+    *,
+    publication_state: str,
+    missing_meter: tuple[str, ...] = (),
+) -> Path:
+    issue_rows = []
+    for issue in issues:
+        location = issue.location
+        issue_rows.append(
+            {
+                "code": issue.code,
+                "part_id": issue.part_id,
+                "measure_number": issue.measure_number,
+                "location": (
+                    {
+                        "page": location.page,
+                        "system": location.system,
+                        "measure_number": location.measure_number,
+                    }
+                    if location is not None
+                    else None
+                ),
+            }
+        )
+    for review in model.review_issues:
+        location = review.location
+        issue_rows.append(
+            {
+                "code": review.code,
+                "part_id": None,
+                "measure_number": location.measure_number if location else None,
+                "location": (
+                    {
+                        "page": location.page,
+                        "system": location.system,
+                        "measure_number": location.measure_number,
+                    }
+                    if location is not None
+                    else None
+                ),
+            }
+        )
+    for measure_number in missing_meter:
+        event_location = next(
+            (
+                event.source_location
+                for part in model.parts
+                for event in part.events
+                if event.source_location
+                and event.source_location.measure_number == measure_number
+            ),
+            None,
+        )
+        issue_rows.append(
+            {
+                "code": "missing_meter",
+                "part_id": None,
+                "measure_number": measure_number,
+                "location": (
+                    {
+                        "page": event_location.page,
+                        "system": event_location.system,
+                        "measure_number": event_location.measure_number,
+                    }
+                    if event_location is not None
+                    else None
+                ),
+            }
+        )
+
+    report_path = out_dir / "review.json"
+    report_path.write_text(
+        json.dumps(
+            {
+                "input_path": str(input_path),
+                "page_count": page_count,
+                "source_part_names": [part.name for part in model.parts],
+                "validation_issues": issue_rows,
+                "state": "needs_source_image_review",
+                "publication_state": publication_state,
+            },
+            ensure_ascii=False,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return report_path
 
 
 def _run_pipeline_in_directory(
@@ -169,18 +265,34 @@ def _run_pipeline_in_directory(
 
     if mode not in ("movable", "fixed"):
         raise ValueError("mode must be 'movable' or 'fixed'")
-    missing_meter = [
+    missing_meter = tuple(
         measure.number
         for measure in model.measures
         if measure.beats is None or measure.beat_type is None
-    ]
+    )
+    issues = validate_score(model)
+    if is_omr and (missing_meter or issues):
+        result = PipelineResult(
+            image=result_image,
+            requires_review=True,
+            publication_state="review_only",
+        )
+        result.review_report = _write_review_report(
+            out_dir,
+            input_path,
+            page_count,
+            model,
+            issues,
+            publication_state=result.publication_state,
+            missing_meter=missing_meter,
+        )
+        return [result]
+
     if missing_meter:
         numbers = ", ".join(missing_meter)
         raise ValueError(
             f"missing_meter: no explicit or inherited meter for measure(s) {numbers}"
         )
-
-    issues = validate_score(model)
     if issues:
         codes = ", ".join(dict.fromkeys(issue.code for issue in issues))
         raise ValueError(f"score validation failed: {codes}")
@@ -227,42 +339,14 @@ def _run_pipeline_in_directory(
         result.jianpu_pdf = jianpu_pdf
 
     if result.requires_review:
-        issue_rows = []
-        for issue in issues:
-            location = issue.location
-            issue_rows.append(
-                {
-                    "code": issue.code,
-                    "part_id": issue.part_id,
-                    "measure_number": issue.measure_number,
-                    "location": (
-                        {
-                            "page": location.page,
-                            "system": location.system,
-                            "measure_number": location.measure_number,
-                        }
-                        if location is not None
-                        else None
-                    ),
-                }
-            )
-        review_out = out_dir / "review.json"
-        review_out.write_text(
-            json.dumps(
-                {
-                    "input_path": str(input_path),
-                    "page_count": page_count,
-                    "source_part_names": [part.name for part in model.parts],
-                    "validation_issues": issue_rows,
-                    "state": "needs_source_image_review",
-                },
-                ensure_ascii=False,
-                indent=2,
-            )
-            + "\n",
-            encoding="utf-8",
+        result.review_report = _write_review_report(
+            out_dir,
+            input_path,
+            page_count,
+            model,
+            issues,
+            publication_state=result.publication_state,
         )
-        result.review_report = review_out
 
     if render_png:
         png_out = out_dir / "rendered" / f"{base_name}.png"
@@ -441,9 +525,9 @@ def run_demo(
         # Use the selected key's one-octave scale on the right hand.
         from music21 import pitch as m21pitch
 
-        tonic = KEY_PRESETS[key_name].tonic
+        generated_tonic = KEY_PRESETS[key_name].tonic
         # tonic.name + octave (B- etc. are also supported).
-        tonic_oct4 = m21pitch.Pitch(tonic.nameWithOctave)
+        tonic_oct4 = m21pitch.Pitch(generated_tonic.nameWithOctave)
         scale_steps = [0, 2, 4, 5, 7, 9, 11, 12]  # major scale (white keys)
         rh = []
         for i in range(0, 8, 4):
@@ -455,7 +539,7 @@ def run_demo(
         # Left hand: a I chord per measure (tonic + third + fifth).
         lh = []
         for _ in range(2):
-            chord_root = m21pitch.Pitch(tonic.nameWithOctave).transpose(
+            chord_root = m21pitch.Pitch(generated_tonic.nameWithOctave).transpose(
                 -12
             )  # down an octave
             third = chord_root.transpose(4)
@@ -557,6 +641,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"jianpu   : {result.jianpu_txt}")
         print(f"Jianpu PDF: {result.jianpu_pdf}")
         print(f"Review   : {result.review_report}")
+        print(f"Status   : {result.publication_state}")
         if result.rendered_png:
             print(f"PNG      : {result.rendered_png}")
         return 0
@@ -584,6 +669,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"Jianpu PDF: {r.jianpu_pdf}")
         print(f"Review   : {r.review_report}")
         print(f"Requires review: {r.requires_review}")
+        print(f"Status   : {r.publication_state}")
         if r.rendered_png:
             print(f"PNG      : {r.rendered_png}")
         print("-" * 60)
