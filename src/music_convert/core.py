@@ -257,7 +257,11 @@ def _notation_contexts(model, tonic: str | None) -> dict[int, tuple[str, str]]:
         if tonic is not None:
             active_tonic = tonic
         if active_mode is None:
-            code = "missing_key_mode" if has_key_signature else "missing_tonic"
+            code = (
+                "missing_tonic"
+                if tonic is None and not has_key_signature
+                else "missing_key_mode"
+            )
             raise ValueError(f"{code}: movable notation requires an explicit key context")
         if active_tonic is None:
             raise ValueError("missing_tonic: movable notation requires a clear key context")
@@ -265,42 +269,13 @@ def _notation_contexts(model, tonic: str | None) -> dict[int, tuple[str, str]]:
     return contexts
 
 
-def _relative_major_tonic(minor_tonic: str) -> str:
-    natural_semitones = {"C": 0, "D": 2, "E": 4, "F": 5, "G": 7, "A": 9, "B": 11}
-    steps = "CDEFGAB"
-    step = minor_tonic[0]
-    alter = 1 if minor_tonic.endswith("#") else -1 if minor_tonic.endswith("b") else 0
-    major_step = steps[(steps.index(step) + 2) % len(steps)]
-    target_pitch_class = (natural_semitones[step] + alter + 3) % 12
-    major_alter = (target_pitch_class - natural_semitones[major_step]) % 12
-    if major_alter > 6:
-        major_alter -= 12
-    accidental = "#" * major_alter if major_alter > 0 else "b" * -major_alter
-    return f"{major_step}{accidental}"
-
-
 def _pitch_token(pitch, *, mode: str, tonic: str | None, key_mode: str | None) -> str:
-    if mode == "movable" and key_mode == "minor":
-        relative_degree, _ = map_pitch(
-            pitch, tonic=tonic, key_mode="minor", notation=mode
-        )
-        prefix = relative_degree.rstrip("0123456789")
-        relative_major_degree = int(relative_degree[len(prefix):])
-        minor_degree = (relative_major_degree + 1) % 7 + 1
-        _, octave = map_pitch(
-            pitch,
-            tonic=_relative_major_tonic(tonic),
-            key_mode="major",
-            notation=mode,
-        )
-        degree = f"{prefix}{minor_degree}"
-    else:
-        degree, octave = map_pitch(
-            pitch,
-            tonic=tonic,
-            key_mode=key_mode,
-            notation=mode,
-        )
+    degree, octave = map_pitch(
+        pitch,
+        tonic=tonic,
+        key_mode=key_mode,
+        notation=mode,
+    )
     octave_suffix = f"^{octave}" if octave > 0 else f"v{-octave}" if octave < 0 else ""
     return f"{degree}{octave_suffix}"
 

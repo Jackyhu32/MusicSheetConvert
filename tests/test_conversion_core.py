@@ -77,6 +77,23 @@ NO_KEY_XML = """<?xml version="1.0"?>
 </score-partwise>
 """
 
+A_MINOR_SCALE_XML = """<?xml version="1.0"?>
+<score-partwise version="4.0">
+  <part-list><score-part id="P"><part-name>Voice</part-name></score-part></part-list>
+  <part id="P"><measure number="1">
+    <attributes><divisions>2</divisions><key><fifths>0</fifths><mode>minor</mode></key>
+      <time><beats>4</beats><beat-type>4</beat-type></time></attributes>
+    <note><pitch><step>A</step><octave>4</octave></pitch><duration>1</duration></note>
+    <note><pitch><step>B</step><octave>4</octave></pitch><duration>1</duration></note>
+    <note><pitch><step>C</step><octave>5</octave></pitch><duration>1</duration></note>
+    <note><pitch><step>D</step><octave>5</octave></pitch><duration>1</duration></note>
+    <note><pitch><step>E</step><octave>5</octave></pitch><duration>1</duration></note>
+    <note><pitch><step>F</step><octave>5</octave></pitch><duration>1</duration></note>
+    <note><pitch><step>G</step><octave>5</octave></pitch><duration>1</duration></note>
+  </measure></part>
+</score-partwise>
+"""
+
 NO_EXPLICIT_MODE_XML = """<?xml version="1.0"?>
 <score-partwise version="4.0">
   <part-list><score-part id="P"><part-name>Voice</part-name></score-part></part-list>
@@ -152,6 +169,17 @@ class ConversionCoreTests(unittest.TestCase):
         )
         self.assertEqual("rest", second_measure[3]["kind"])
 
+    def test_a_minor_natural_scale_jsonl_uses_each_scale_degree_once(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = self.write_xml(directory, "a-minor-scale.musicxml", A_MINOR_SCALE_XML)
+            events = [
+                row for row in rows(core.musicxml_to_jianpu_text(path))
+                if row["type"] == "event"
+            ]
+        self.assertEqual(["6", "7", "1", "2", "3", "4", "5"], [
+            row["pitches"] for row in events
+        ])
+
     def test_key_signature_change_alone_does_not_change_the_notation_tonic(self):
         with tempfile.TemporaryDirectory() as directory:
             path = self.write_xml(directory, "signature-change.musicxml", SIGNATURE_CHANGE_XML)
@@ -165,7 +193,7 @@ class ConversionCoreTests(unittest.TestCase):
             if row["type"] == "event"
         ]
         self.assertEqual(
-            [("1", "1"), ("2", "3")],
+            [("1", "1"), ("2", "1v1")],
             [(row["measure"], row["pitches"]) for row in events],
         )
 
@@ -237,6 +265,8 @@ class ConversionCoreTests(unittest.TestCase):
             path = self.write_xml(directory, "no-key.musicxml", NO_KEY_XML)
             with self.assertRaisesRegex(ValueError, "missing_tonic"):
                 core.musicxml_to_jianpu_text(path, mode="movable")
+            with self.assertRaisesRegex(ValueError, "missing_key_mode"):
+                core.musicxml_to_jianpu_text(path, mode="movable", tonic="C")
             fixed = core.musicxml_to_jianpu_text(path, mode="fixed")
         self.assertTrue(any(row["type"] == "event" for row in rows(fixed)))
 
