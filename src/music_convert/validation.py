@@ -71,6 +71,26 @@ def _validate_timeline(
             ordered_events = sorted(events, key=lambda value: (value.onset, value.duration))
             for item in ordered_events:
                 if item.grace and item.duration == 0:
+                    if item.onset < 0:
+                        issues.append(
+                            ValidationIssue(
+                                "measure_negative_onset",
+                                part.id,
+                                measure.number,
+                                f"Grace event starts before measure at {item.onset}.",
+                                item.source_location,
+                            )
+                        )
+                    elif item.onset > measure.duration:
+                        issues.append(
+                            ValidationIssue(
+                                "measure_overflow",
+                                part.id,
+                                measure.number,
+                                f"Grace event starts at {item.onset}, beyond declared measure duration {measure.duration}.",
+                                item.source_location,
+                            )
+                        )
                     continue
                 if item.duration <= 0:
                     issues.append(

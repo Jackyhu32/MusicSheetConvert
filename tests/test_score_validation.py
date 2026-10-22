@@ -125,6 +125,53 @@ class ScoreValidationTests(unittest.TestCase):
         )
         self.assertEqual([], validate_score(score))
 
+    def test_grace_note_at_declared_measure_endpoint_is_allowed(self):
+        """Grace onset uses an inclusive [0, measure duration] boundary."""
+        score = model(
+            [
+                event(0, 0, 4, sounding_pitches=(Pitch("C", 0, 4),)),
+                event(
+                    0,
+                    4,
+                    0,
+                    pitches=(Pitch("D", 0, 4),),
+                    sounding_pitches=(Pitch("D", 0, 4),),
+                    grace=True,
+                ),
+            ]
+        )
+        self.assertEqual([], validate_score(score))
+
+    def test_grace_note_beyond_measure_endpoint_reports_overflow(self):
+        score = model(
+            [
+                event(
+                    0,
+                    5,
+                    0,
+                    pitches=(Pitch("D", 0, 4),),
+                    sounding_pitches=(Pitch("D", 0, 4),),
+                    grace=True,
+                )
+            ]
+        )
+        self.assertIn("measure_overflow", self.codes(score))
+
+    def test_grace_note_before_measure_start_reports_negative_onset(self):
+        score = model(
+            [
+                event(
+                    0,
+                    -1,
+                    0,
+                    pitches=(Pitch("D", 0, 4),),
+                    sounding_pitches=(Pitch("D", 0, 4),),
+                    grace=True,
+                )
+            ]
+        )
+        self.assertIn("measure_negative_onset", self.codes(score))
+
     def test_zero_duration_non_grace_note_is_invalid(self):
         score = model(
             [
