@@ -85,7 +85,7 @@ class ScoreModelTests(unittest.TestCase):
         self.assertEqual((sounding_pitch,), event.effective_sounding_pitches)
         self.assertNotEqual(event.written_pitches, event.sounding_pitches)
 
-    def test_effective_sounding_pitches_fall_back_to_written_pitches_or_empty_for_rest(self):
+    def test_effective_sounding_pitches_requires_explicit_pitch_for_pitched_events(self):
         written_pitch = Pitch("G", 0, 4)
         note = ScoreEvent(
             part_id="S",
@@ -96,17 +96,30 @@ class ScoreModelTests(unittest.TestCase):
             kind="note",
             pitches=(written_pitch,),
         )
-        rest = ScoreEvent(
+        chord = ScoreEvent(
             part_id="S",
             measure_index=0,
             voice_id="1",
             onset=Fraction(1),
             duration=Fraction(1),
+            kind="chord",
+            pitches=(written_pitch, Pitch("B", 0, 4)),
+        )
+        rest = ScoreEvent(
+            part_id="S",
+            measure_index=0,
+            voice_id="1",
+            onset=Fraction(2),
+            duration=Fraction(1),
             kind="rest",
             pitches=(written_pitch,),
         )
 
-        self.assertEqual((written_pitch,), note.effective_sounding_pitches)
+        message = "sounding pitches must be explicitly provided before conversion"
+        with self.assertRaisesRegex(ValueError, message):
+            _ = note.effective_sounding_pitches
+        with self.assertRaisesRegex(ValueError, message):
+            _ = chord.effective_sounding_pitches
         self.assertEqual((), rest.effective_sounding_pitches)
 
     def test_timing_contexts_and_model_constructors_keep_exact_values(self):

@@ -72,10 +72,14 @@ class ScoreEvent:
 
     @property
     def effective_sounding_pitches(self) -> tuple[Pitch, ...]:
-        """Return sounding pitches, defaulting to written pitches when unison."""
+        """Return explicit sounding pitches, rejecting unresolved pitched events."""
         if self.kind == "rest":
             return ()
-        return self.sounding_pitches or self.pitches
+        if not self.sounding_pitches:
+            raise ValueError(
+                "sounding pitches must be explicitly provided before conversion"
+            )
+        return self.sounding_pitches
 
 
 @dataclass(frozen=True)
