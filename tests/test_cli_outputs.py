@@ -4,7 +4,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from src.main import build_parser, run_pipeline
+from src.main import build_parser, main, run_pipeline
 from src.music_convert.musicxml_io import load_musicxml
 
 ROOT = Path(__file__).parent
@@ -151,6 +151,55 @@ class CliOutputContractTests(unittest.TestCase):
             self.assertEqual(1, len(results))
             self.assertTrue(results[0].jianpu_txt.is_file())
             self.assertTrue(results[0].jianpu_pdf.is_file())
+
+    def test_missing_meter_fails_before_publishing_bundle(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = FIXTURES / "keyless-no-meter.musicxml"
+            output = root / "output"
+            parsed = load_musicxml(source)
+            self.assertIsNone(parsed.measures[0].beats)
+            self.assertEqual(4, parsed.measures[0].duration)
+
+            with self.assertRaisesRegex(ValueError, "missing_meter"):
+                run_pipeline(source, output, mode="fixed")
+
+            self.assertEqual([], list(output.glob("*")))
+            self.assertEqual([], list(output.glob(".staging-*")))
+
+    def test_demo_honors_selected_pdf_and_fixed_notation_options(self):
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "output"
+            rendered = []
+
+            def write_pdf(model, path, *, notation, tonic):
+                rendered.append((model, notation, tonic))
+                return _write_output(path, b"mock Jianpu PDF")
+
+            with patch("src.main.render_jianpu_pdf", side_effect=write_pdf):
+                self.assertEqual(
+                    0,
+                    main(
+                        [
+                            "--demo",
+                            "chord_progression",
+                            "--out",
+                            str(output),
+                            "--formats",
+                            "pdf",
+                            "--mode",
+                            "fixed",
+                            "--tonic",
+                            "D",
+                        ]
+                    ),
+                )
+
+            files = [path for path in output.rglob("*") if path.is_file()]
+            self.assertEqual(["chord_progression_c.pdf"], [path.name for path in files])
+            self.assertEqual(1, len(rendered))
+            self.assertEqual("fixed", rendered[0][1])
+            self.assertEqual("D", rendered[0][2])
 
     def test_two_page_omr_is_merged_once_and_always_requires_review(self):
         with tempfile.TemporaryDirectory() as directory:

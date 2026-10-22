@@ -47,6 +47,12 @@ class MainPipelinePageMergeTests(unittest.TestCase):
             output_directory.mkdir(parents=True, exist_ok=True)
             result = output_directory / f"{image.stem}.musicxml"
             fixture_bytes = (self.fixtures / page_fixtures[index]).read_bytes()
+            if b"<time>" not in fixture_bytes:
+                fixture_bytes = fixture_bytes.replace(
+                    b"<attributes><divisions>1</divisions>",
+                    b"<attributes><divisions>1</divisions>"
+                    b"<time><beats>4</beats><beat-type>4</beat-type></time>",
+                )
             fixture_bytes = fixture_bytes.replace(b'<tie type="start"/>', b"")
             fixture_bytes = fixture_bytes.replace(
                 b'<notations><tied type="start"/><slur type="start" number="1"/></notations>',

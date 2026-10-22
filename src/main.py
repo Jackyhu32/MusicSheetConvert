@@ -34,14 +34,12 @@ from .music_convert.advanced import (
     build_chord_progression,
     build_grand_staff,
     build_key_demonstration,
-    write_score,
 )
 from .music_convert.musicxml_io import load_musicxml, merge_page_models
 from .music_convert.validation import validate_score
 from .ocr import AudiverisConfig, image_to_musicxml, is_audiveris_available
 from .preprocess import pdf_to_images, preprocess_image
 from .render import (
-    musicxml_to_jianpu_text_file,
     musicxml_to_png,
     score_model_to_jianpu_text_file,
 )
@@ -171,6 +169,17 @@ def _run_pipeline_in_directory(
 
     if mode not in ("movable", "fixed"):
         raise ValueError("mode must be 'movable' or 'fixed'")
+    missing_meter = [
+        measure.number
+        for measure in model.measures
+        if measure.beats is None or measure.beat_type is None
+    ]
+    if missing_meter:
+        numbers = ", ".join(missing_meter)
+        raise ValueError(
+            f"missing_meter: no explicit or inherited meter for measure(s) {numbers}"
+        )
+
     issues = validate_score(model)
     if issues:
         codes = ", ".join(dict.fromkeys(issue.code for issue in issues))
@@ -412,9 +421,17 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run_demo(
-    demo: str, key_name: str, title: str | None, out_dir: Path, bpm: int, render: bool
+    demo: str,
+    key_name: str,
+    title: str | None,
+    out_dir: Path,
+    bpm: int,
+    render: bool,
+    mode: str = "movable",
+    tonic: str | None = None,
+    formats: tuple[str, ...] = _DEFAULT_FORMATS,
 ) -> PipelineResult:
-    """Generate a preset complex score and emit the full output bundle (MusicXML / MIDI / jianpu / PNG)."""
+    """Generate a preset score through the validated transactional bundle pipeline."""
     out_dir.mkdir(parents=True, exist_ok=True)
     log.info(
         "Generating complex score: demo=%s, key=%s, title=%s", demo, key_name, title
@@ -491,31 +508,32 @@ def run_demo(
         score = build_key_demonstration()
         base_name = "key_demonstration"
 
-    paths = write_score(score, out_dir, base_name)
-    log.info("MusicXML: %s", paths["musicxml"])
-    log.info("MIDI    : %s", paths["midi"])
+    with tempfile.TemporaryDirectory(prefix="score-demo-") as directory:
+        source_musicxml = Path(directory) / f"{base_name}.musicxml"
+        score.write("musicxml", fp=str(source_musicxml))
+        results = run_pipeline(
+            input_path=source_musicxml,
+            out_dir=out_dir,
+            bpm=bpm,
+            render_png=render,
+            skip_ocr=True,
+            mode=mode,
+            tonic=tonic,
+            formats=formats,
+        )
 
-    result = PipelineResult(
-        image=paths["musicxml"],
-        musicxml=paths["musicxml"],
-        midi=paths["midi"],
+    result = results[0]
+    result.image = next(
+        path
+        for path in (
+            result.musicxml,
+            result.jianpu_pdf,
+            result.jianpu_txt,
+            result.midi,
+            result.rendered_png,
+        )
+        if path is not None
     )
-
-    # jianpu
-    jianpu_out = out_dir / "jianpu" / f"{base_name}.txt"
-    musicxml_to_jianpu_text_file(paths["musicxml"], jianpu_out)
-    result.jianpu_txt = jianpu_out
-    log.info("jianpu text: %s", jianpu_out)
-
-    # Render PNG
-    if render:
-        png_out = out_dir / "rendered" / f"{base_name}.png"
-        try:
-            musicxml_to_png(paths["musicxml"], png_out)
-            result.rendered_png = png_out
-            log.info("Rendered staff PNG: %s", png_out)
-        except RuntimeError as e:
-            log.warning("MuseScore unavailable, skipping render: %s", e)
     return result
 
 
@@ -529,11 +547,16 @@ def main(argv: list[str] | None = None) -> int:
             out_dir=args.out,
             bpm=args.bpm,
             render=args.render,
+            mode=args.mode,
+            tonic=args.tonic,
+            formats=args.formats,
         )
         print("\n=== Complex score generation result ===")
         print(f"MusicXML : {result.musicxml}")
         print(f"MIDI     : {result.midi}")
         print(f"jianpu   : {result.jianpu_txt}")
+        print(f"Jianpu PDF: {result.jianpu_pdf}")
+        print(f"Review   : {result.review_report}")
         if result.rendered_png:
             print(f"PNG      : {result.rendered_png}")
         return 0
