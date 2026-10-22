@@ -65,6 +65,11 @@ class ScoreEvent:
     lyrics: tuple[Lyric, ...] = ()
     source_location: SourceLocation | None = None
 
+    @property
+    def written_pitches(self) -> tuple[Pitch, ...]:
+        """Return pitches as notated, preserving the legacy ``pitches`` field."""
+        return self.pitches
+
 
 @dataclass(frozen=True)
 class MeasureContext:

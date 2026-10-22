@@ -65,6 +65,25 @@ class ScoreModelTests(unittest.TestCase):
         self.assertEqual(lyrics, event.lyrics)
         self.assertEqual("3", event.source_location.measure_number)
 
+    def test_event_keeps_written_and_sounding_pitches_independently(self):
+        written_pitch = Pitch("C", 0, 4)
+        sounding_pitch = Pitch("B", -1, 3)
+        event = ScoreEvent(
+            part_id="BbClarinet",
+            measure_index=0,
+            voice_id="1",
+            onset=Fraction(0),
+            duration=Fraction(1),
+            kind="note",
+            pitches=(written_pitch,),
+            sounding_pitches=(sounding_pitch,),
+        )
+
+        self.assertEqual((written_pitch,), event.written_pitches)
+        self.assertEqual((written_pitch,), event.pitches)
+        self.assertEqual((sounding_pitch,), event.sounding_pitches)
+        self.assertNotEqual(event.written_pitches, event.sounding_pitches)
+
     def test_timing_contexts_and_model_constructors_keep_exact_values(self):
         direction = ScoreDirection(0, Fraction(1, 3), "dynamic", "p")
         measure = MeasureContext(0, "1", Fraction(7, 2), 2, "major", 7, 4,
